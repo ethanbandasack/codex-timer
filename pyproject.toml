@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-timer"
+version = "1.0.0"
+description = "A minimal terminal app for Codex pings and usage reset timers"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+codex-timer = "codex_timer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["codex_timer*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
