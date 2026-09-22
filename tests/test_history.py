@@ -11,13 +11,19 @@ class FakeUsageSource:
         return {
             "planType": "plus",
             "primary": {"usedPercent": 12, "resetsAt": 2_000_000_000, "windowDurationMins": 300},
-            "secondary": {"usedPercent": 34, "resetsAt": 2_000_100_000, "windowDurationMins": 10080},
+            "secondary": {
+                "usedPercent": 34,
+                "resetsAt": 2_000_100_000,
+                "windowDurationMins": 10080,
+            },
         }
 
     def token_usage(self):
         return {
             "summary": {"lifetimeTokens": 12345, "peakDailyTokens": 2345},
-            "dailyUsageBuckets": [{"startDate": dt.date.today().isoformat(), "tokens": 678}],
+            "dailyUsageBuckets": [
+                {"startDate": dt.datetime.now().astimezone().date().isoformat(), "tokens": 678}
+            ],
         }
 
 
@@ -36,7 +42,7 @@ class HistoryStoreTests(unittest.TestCase):
     def test_daily_token_bucket_updates_instead_of_duplicating(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = HistoryStore(Path(temp_dir) / "history.sqlite3")
-            today = dt.date.today().isoformat()
+            today = dt.datetime.now().astimezone().date().isoformat()
             store.record_token_activity({"dailyUsageBuckets": [{"startDate": today, "tokens": 20}]})
             store.record_token_activity({"dailyUsageBuckets": [{"startDate": today, "tokens": 30}]})
             history = store.history(days=1)

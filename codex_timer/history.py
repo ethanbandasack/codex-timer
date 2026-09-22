@@ -12,7 +12,6 @@ from typing import Any
 
 from .usage import window_rows
 
-
 RETENTION_DAYS = 90
 
 
@@ -76,7 +75,9 @@ class HistoryStore:
                 """
             )
 
-    def record_quota_snapshot(self, limits: dict[str, Any], captured_at: float | None = None) -> int:
+    def record_quota_snapshot(
+        self, limits: dict[str, Any], captured_at: float | None = None
+    ) -> int:
         if captured_at is None:
             captured_at = time.time()
         plan_type = limits.get("planType")
@@ -157,7 +158,7 @@ class HistoryStore:
 
     def history(self, days: int = 30) -> dict[str, Any]:
         days = min(365, max(1, days))
-        today = dt.date.today()
+        today = dt.datetime.now().astimezone().date()
         start_date = (today - dt.timedelta(days=days - 1)).isoformat()
         start_time = time.time() - days * 86400
         with self._connect() as db:
@@ -185,7 +186,8 @@ class HistoryStore:
 
     def _prune(self, db: sqlite3.Connection, now: float) -> None:
         cutoff = now - self.retention_days * 86400
-        cutoff_date = (dt.date.today() - dt.timedelta(days=self.retention_days)).isoformat()
+        today = dt.datetime.fromtimestamp(now).astimezone().date()
+        cutoff_date = (today - dt.timedelta(days=self.retention_days)).isoformat()
         db.execute("DELETE FROM quota_samples WHERE captured_at < ?", (cutoff,))
         db.execute("DELETE FROM daily_token_usage WHERE usage_date < ?", (cutoff_date,))
 

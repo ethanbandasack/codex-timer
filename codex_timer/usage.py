@@ -27,13 +27,13 @@ def window_rows(limits: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return rows
 
 
-def local_time(timestamp: int | float | None) -> str:
+def local_time(timestamp: float | None) -> str:
     if timestamp is None:
         return "unknown"
     return dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%a %d %b %H:%M:%S %Z")
 
 
-def remaining_text(timestamp: int | float | None, now: float | None = None) -> str:
+def remaining_text(timestamp: float | None, now: float | None = None) -> str:
     if timestamp is None:
         return "unknown"
     seconds = max(0, math.ceil(timestamp - (time.time() if now is None else now)))
@@ -66,7 +66,9 @@ def print_status(limits: dict[str, Any]) -> None:
         used = window.get("usedPercent")
         used_text = f"{used:g}% used" if isinstance(used, (int, float)) else "usage unavailable"
         reset = window.get("resetsAt")
-        print(f"  {label}: {used_text}; resets {local_time(reset)} ({remaining_text(reset)} remaining)")
+        print(
+            f"  {label}: {used_text}; resets {local_time(reset)} ({remaining_text(reset)} remaining)"
+        )
     if limits.get("rateLimitReachedType"):
         print(f"  Limit state: {limits['rateLimitReachedType']}")
 
@@ -80,7 +82,9 @@ def short_status(limits: dict[str, Any], now: float) -> str:
         reset = window.get("resetsAt")
         used = window.get("usedPercent")
         used_text = f"{used:g}%" if isinstance(used, (int, float)) else "?%"
-        pieces.append(f"{label} {remaining_text(reset, now)} left ({used_text}, {local_time(reset)})")
+        pieces.append(
+            f"{label} {remaining_text(reset, now)} left ({used_text}, {local_time(reset)})"
+        )
     return " | ".join(pieces)
 
 

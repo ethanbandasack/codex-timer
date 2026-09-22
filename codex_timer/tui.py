@@ -11,8 +11,9 @@ import time
 from typing import Any
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
-from .history import HistoryStore, capture_history
+from .charts import ChartDependencyError, default_export_path, export_chart
 from .histogram import render_histogram
+from .history import HistoryStore, capture_history
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
 
@@ -39,7 +40,9 @@ class UsageWorker(threading.Thread):
                     next_poll = time.monotonic() + 60
                     while not self.stopping.is_set():
                         try:
-                            action = self.actions.get(timeout=max(0.1, next_poll - time.monotonic()))
+                            action = self.actions.get(
+                                timeout=max(0.1, next_poll - time.monotonic())
+                            )
                         except queue.Empty:
                             action = "refresh"
                         if action == "stop":
@@ -48,7 +51,9 @@ class UsageWorker(threading.Thread):
                             self.emit("ping", state="running", text="Sending one-word hello…")
                             try:
                                 server.ping(DEFAULT_MODEL, DEFAULT_EFFORT, timeout=30)
-                                self.emit("ping", state="done", text="Hello sent; temporary chat closed.")
+                                self.emit(
+                                    "ping", state="done", text="Hello sent; temporary chat closed."
+                                )
                             except (RuntimeError, TimeoutError, OSError) as exc:
                                 self.emit("ping", state="error", text=f"Ping failed: {exc}")
                         if action in ("refresh", "ping"):
@@ -69,6 +74,16 @@ class UsageWorker(threading.Thread):
     def stop(self) -> None:
         self.stopping.set()
         self.actions.put("stop")
+
+
+def _export_history(events: queue.Queue[dict[str, Any]]) -> None:
+    try:
+        history = HistoryStore().history(30)
+        output = export_chart(history, default_export_path())
+    except (ChartDependencyError, OSError, sqlite3.Error) as exc:
+        events.put({"kind": "export", "state": "error", "text": f"PNG export failed: {exc}"})
+        return
+    events.put({"kind": "export", "state": "done", "text": f"PNG saved to {output}"})
 
 
 def _safe_addstr(screen: Any, y: int, x: int, text: str, attr: int = 0) -> None:
@@ -134,6 +149,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     message = "Fetching account reset windows"
     message_attr = curses.A_DIM
     ping_running = False
+    export_running = False
     last_updated: float | None = None
     show_history = False
     history_lines: list[str] = []
@@ -171,43 +187,79 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     message_attr = curses.color_pair(4) | curses.A_BOLD
                 else:
                     message_attr = curses.color_pair(2) | curses.A_BOLD
+            elif event["kind"] == "export":
+                export_running = False
+                message = event["text"]
+                message_attr = (
+                    curses.color_pair(2) | curses.A_BOLD
+                    if event["state"] == "done"
+                    else curses.color_pair(3) | curses.A_BOLD
+                )
 
         screen.erase()
         height, width = screen.getmaxyx()
         cyan = curses.color_pair(1) | curses.A_BOLD
-        safe_addstr(screen, 1, 2, "CODEX TIMER", cyan)
+        _safe_addstr(screen, 1, 2, "CODEX TIMER", cyan)
         now_text = dt.datetime.now().astimezone().strftime("%a %d %b  %H:%M:%S %Z")
-        safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
-        safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
+        _safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
+        _safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
         if show_history:
-            safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
+            _safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
             for index, line in enumerate(history_lines[: max(0, height - 9)], start=5):
-                safe_addstr(screen, index, 3, line)
-            safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
-            safe_addstr(screen, max(0, height - 3), 2, "[H] Back to timer   [R] Refresh usage   [Q] Quit", curses.A_BOLD)
+                _safe_addstr(screen, index, 3, line)
+            _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            _safe_addstr(
+                screen,
+                max(0, height - 3),
+                2,
+                "[H] Back   [E] Export PNG   [R] Refresh   [Q] Quit",
+                curses.A_BOLD,
+            )
         else:
             online = connection == "Connected to Codex"
-            safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
+            _safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
             if width >= 70:
                 card_width = (width - 7) // 2
                 _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
-                _draw_window_card(screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary"))
+                _draw_window_card(
+                    screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                )
                 details_y = 13
             else:
                 card_width = width - 4
                 _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
-                _draw_window_card(screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary"))
+                _draw_window_card(
+                    screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                )
                 details_y = 20
 
             if limits.get("planType"):
                 _safe_addstr(screen, details_y, 2, f"Plan: {limits['planType']}")
-            _safe_addstr(screen, details_y + 1, 2, f"Ping model: {DEFAULT_MODEL} · {DEFAULT_EFFORT} effort")
+            _safe_addstr(
+                screen, details_y + 1, 2, f"Ping model: {DEFAULT_MODEL} · {DEFAULT_EFFORT} effort"
+            )
             if last_updated is not None:
-                updated_text = dt.datetime.fromtimestamp(last_updated).astimezone().strftime("%H:%M:%S %Z")
-                _safe_addstr(screen, details_y + 2, 2, f"Usage refreshed: {updated_text}", curses.A_DIM)
+                updated_text = (
+                    dt.datetime.fromtimestamp(last_updated).astimezone().strftime("%H:%M:%S %Z")
+                )
+                _safe_addstr(
+                    screen, details_y + 2, 2, f"Usage refreshed: {updated_text}", curses.A_DIM
+                )
             _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
-            _safe_addstr(screen, max(0, height - 3), 2, "[P] Ping hello   [H] History   [R] Refresh   [Q] Quit", curses.A_BOLD)
-            _safe_addstr(screen, max(0, height - 2), 2, "Server reset times · automatic refresh every 60s", curses.A_DIM)
+            _safe_addstr(
+                screen,
+                max(0, height - 3),
+                2,
+                "[P] Ping   [H] History   [E] Export PNG   [R] Refresh   [Q] Quit",
+                curses.A_BOLD,
+            )
+            _safe_addstr(
+                screen,
+                max(0, height - 2),
+                2,
+                "Server reset times · automatic refresh every 60s",
+                curses.A_DIM,
+            )
         screen.refresh()
 
         key = screen.getch()
@@ -229,6 +281,11 @@ def _terminal_app(screen: Any, executable: str) -> None:
             ping_running = True
             message = "Starting hello ping…"
             message_attr = curses.color_pair(4) | curses.A_BOLD
+        elif key in (ord("e"), ord("E")) and not export_running:
+            export_running = True
+            message = "Exporting usage curves to PNG…"
+            message_attr = curses.color_pair(4) | curses.A_BOLD
+            threading.Thread(target=_export_history, args=(worker.events,), daemon=True).start()
 
     worker.stop()
     worker.join(timeout=3)

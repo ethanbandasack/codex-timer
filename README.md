@@ -31,11 +31,15 @@ bin/codex-timer ping
 bin/codex-timer ping --watch
 bin/codex-timer watch
 bin/codex-timer history --days 14
+bin/codex-timer export --days 30 --output ~/Desktop/codex-usage.png
 bin/codex-timer history --days 14
 ```
 
 `status` reads the current server-reported reset times without sending a model request, and saves a history snapshot. `watch` continuously shows the countdown, saves snapshots, and notifies when Codex reports a reset.
 `history` renders daily token activity as a terminal histogram, or falls back to recent 5-hour quota snapshots until token activity is available.
+`export` writes daily token activity and 5-hour/weekly quota curves to a PNG. The TUI's `E` key exports the same chart to the app's exports folder.
+
+PNG rendering is optional so the base app stays lightweight. Install the chart extra once with `python3 -m pip install '.[charts]'` from this repository; without it, export prints the install command and exits cleanly.
 
 ## Use from any zsh directory
 
