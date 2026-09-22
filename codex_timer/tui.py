@@ -12,6 +12,7 @@ from typing import Any
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .history import HistoryStore, capture_history
+from .histogram import render_histogram
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
 
@@ -134,6 +135,8 @@ def _terminal_app(screen: Any, executable: str) -> None:
     message_attr = curses.A_DIM
     ping_running = False
     last_updated: float | None = None
+    show_history = False
+    history_lines: list[str] = []
     keep_running = True
 
     while keep_running:
@@ -176,34 +179,47 @@ def _terminal_app(screen: Any, executable: str) -> None:
         now_text = dt.datetime.now().astimezone().strftime("%a %d %b  %H:%M:%S %Z")
         safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
         safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
-        online = connection == "Connected to Codex"
-        safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
-
-        if width >= 70:
-            card_width = (width - 7) // 2
-            _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
-            _draw_window_card(screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary"))
-            details_y = 13
+        if show_history:
+            safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
+            for index, line in enumerate(history_lines[: max(0, height - 9)], start=5):
+                safe_addstr(screen, index, 3, line)
+            safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            safe_addstr(screen, max(0, height - 3), 2, "[H] Back to timer   [R] Refresh usage   [Q] Quit", curses.A_BOLD)
         else:
-            card_width = width - 4
-            _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
-            _draw_window_card(screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary"))
-            details_y = 20
+            online = connection == "Connected to Codex"
+            safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
+            if width >= 70:
+                card_width = (width - 7) // 2
+                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
+                _draw_window_card(screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary"))
+                details_y = 13
+            else:
+                card_width = width - 4
+                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
+                _draw_window_card(screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary"))
+                details_y = 20
 
-        if limits.get("planType"):
-            _safe_addstr(screen, details_y, 2, f"Plan: {limits['planType']}")
-        _safe_addstr(screen, details_y + 1, 2, f"Ping model: {DEFAULT_MODEL} · {DEFAULT_EFFORT} effort")
-        if last_updated is not None:
-            updated_text = dt.datetime.fromtimestamp(last_updated).astimezone().strftime("%H:%M:%S %Z")
-            _safe_addstr(screen, details_y + 2, 2, f"Usage refreshed: {updated_text}", curses.A_DIM)
-        _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
-        _safe_addstr(screen, max(0, height - 3), 2, "[P] Ping hello   [R] Refresh usage   [Q] Quit", curses.A_BOLD)
-        _safe_addstr(screen, max(0, height - 2), 2, "Server reset times · automatic refresh every 60s", curses.A_DIM)
+            if limits.get("planType"):
+                _safe_addstr(screen, details_y, 2, f"Plan: {limits['planType']}")
+            _safe_addstr(screen, details_y + 1, 2, f"Ping model: {DEFAULT_MODEL} · {DEFAULT_EFFORT} effort")
+            if last_updated is not None:
+                updated_text = dt.datetime.fromtimestamp(last_updated).astimezone().strftime("%H:%M:%S %Z")
+                _safe_addstr(screen, details_y + 2, 2, f"Usage refreshed: {updated_text}", curses.A_DIM)
+            _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            _safe_addstr(screen, max(0, height - 3), 2, "[P] Ping hello   [H] History   [R] Refresh   [Q] Quit", curses.A_BOLD)
+            _safe_addstr(screen, max(0, height - 2), 2, "Server reset times · automatic refresh every 60s", curses.A_DIM)
         screen.refresh()
 
         key = screen.getch()
         if key in (ord("q"), ord("Q"), 27):
             keep_running = False
+        elif key in (ord("h"), ord("H")):
+            show_history = not show_history
+            if show_history:
+                try:
+                    history_lines = render_histogram(HistoryStore().history(14), width - 6)
+                except sqlite3.Error as exc:
+                    history_lines = [f"Could not read local history: {exc}"]
         elif key in (ord("r"), ord("R")):
             worker.actions.put("refresh")
             message = "Refreshing usage…"

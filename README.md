@@ -16,6 +16,7 @@ Keyboard controls:
 
 - `P` sends a one-word hello using `gpt-5.6-luna` at low effort, then closes the in-memory chat.
 - `R` refreshes usage immediately.
+- `H` opens the local consumption history.
 - `Q` or `Esc` exits.
 
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
@@ -29,9 +30,12 @@ bin/codex-timer status
 bin/codex-timer ping
 bin/codex-timer ping --watch
 bin/codex-timer watch
+bin/codex-timer history --days 14
+bin/codex-timer history --days 14
 ```
 
 `status` reads the current server-reported reset times without sending a model request, and saves a history snapshot. `watch` continuously shows the countdown, saves snapshots, and notifies when Codex reports a reset.
+`history` renders daily token activity as a terminal histogram, or falls back to recent 5-hour quota snapshots until token activity is available.
 
 ## Use from any zsh directory
 
