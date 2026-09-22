@@ -7,7 +7,7 @@ import math
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 def window_rows(limits: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -106,7 +106,13 @@ def announce_reset(label: str, *, terminal_bell: bool = True) -> None:
         print("\a", end="", flush=True)
 
 
-def watch(server: Any, initial_limits: dict[str, Any], poll_seconds: int, notify: bool) -> None:
+def watch(
+    server: Any,
+    initial_limits: dict[str, Any],
+    poll_seconds: int,
+    notify: bool,
+    refresh: Callable[[], dict[str, Any]] | None = None,
+) -> None:
     limits = initial_limits
     previous_resets = reset_map(limits)
     next_poll = time.monotonic() + poll_seconds
@@ -120,7 +126,7 @@ def watch(server: Any, initial_limits: dict[str, Any], poll_seconds: int, notify
             now = time.time()
             if time.monotonic() >= next_poll:
                 try:
-                    refreshed = server.rate_limits()
+                    refreshed = refresh() if refresh else server.rate_limits()
                     current_resets = reset_map(refreshed)
                     for label, previous in previous_resets.items():
                         current = current_resets.get(label)

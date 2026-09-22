@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import sqlite3
 import sys
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
+from .history import HistoryStore, capture_history
 from .tui import run_terminal_app
 from .usage import print_status, watch
 
@@ -45,28 +47,45 @@ def main() -> int:
         return 1
 
     try:
+        history = HistoryStore()
         if args.command in (None, "tui"):
             return run_terminal_app(executable)
         with CodexServer(executable) as server:
             if args.command == "status":
-                print_status(server.rate_limits())
+                limits = capture_history(server, history)
+                print_status(limits)
+                print(f"Local history: {history.path}")
                 return 0
             if args.command == "watch":
-                watch(server, server.rate_limits(), args.poll_seconds, not args.no_notify)
+                limits = capture_history(server, history)
+                watch(
+                    server,
+                    limits,
+                    args.poll_seconds,
+                    not args.no_notify,
+                    refresh=lambda: capture_history(server, history),
+                )
                 return 0
 
             print(f"Sending a tiny hello ping with {args.model} ({args.effort} effort)…", flush=True)
             server.ping(args.model, args.effort, args.timeout)
             print("Codex replied; the in-memory chat is now closed.")
-            limits = server.rate_limits()
+            limits = capture_history(server, history)
             print_status(limits)
+            print(f"Local history: {history.path}")
             if args.watch:
-                watch(server, limits, args.poll_seconds, not args.no_notify)
+                watch(
+                    server,
+                    limits,
+                    args.poll_seconds,
+                    not args.no_notify,
+                    refresh=lambda: capture_history(server, history),
+                )
             return 0
     except FileNotFoundError:
         print(f"Codex executable not found: {executable}", file=sys.stderr)
         return 1
-    except (RuntimeError, TimeoutError, OSError) as exc:
+    except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
         print(f"Codex Timer: {exc}", file=sys.stderr)
         print("Check that Codex is signed in with your ChatGPT account.", file=sys.stderr)
         return 1
