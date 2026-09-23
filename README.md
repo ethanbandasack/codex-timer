@@ -16,12 +16,14 @@ Keyboard controls:
 
 - `P` sends a one-word hello using `gpt-5.6-luna` at low effort, then closes the in-memory chat.
 - `R` refreshes usage immediately.
+- `S` opens the programming menu, anchored to Codex's reported 5-hour reset. `+` adds a band 5h01 after the previous row (`08:01`, then `13:02` for a `03:00` reset); `↑`/`↓` select rows; `←`/`→` shift the reset anchor by one hour (moving every band) or a selected band and later bands by five minutes; `X` deletes a band.
 - `H` opens the local consumption history.
 - `Q` or `Esc` exits.
 
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
 
 The app records quota usage snapshots and Codex's daily token-activity totals locally. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
+The reset anchor and bands are stored locally in that database. Editing the anchor changes only the local plan; server-reported reset times remain read-only, and bands do not send pings automatically.
 
 ## Terminal commands
 

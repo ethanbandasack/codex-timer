@@ -86,6 +86,19 @@ def _export_history(events: queue.Queue[dict[str, Any]]) -> None:
     events.put({"kind": "export", "state": "done", "text": f"PNG saved to {output}"})
 
 
+def _planned_rows(store: HistoryStore, limits: dict[str, Any]) -> list[dict[str, Any]]:
+    primary = limits.get("primary") or {}
+    reset_at = primary.get("resetsAt")
+    reset_at = reset_at if isinstance(reset_at, (int, float)) else None
+    anchor = store.ensure_plan_anchor(reset_at)
+    if anchor is None:
+        return []
+    return [
+        {"id": None, "position": -1, "scheduled_at": anchor},
+        *store.planned_slots(),
+    ]
+
+
 def _safe_addstr(screen: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     height, width = screen.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
@@ -103,11 +116,16 @@ def _draw_window_card(
     width: int,
     title: str,
     window: dict[str, Any] | None,
+    selected: bool = False,
 ) -> None:
     card_width = max(16, min(width, screen.getmaxyx()[1] - x - 1))
     rule = "+" + "-" * (card_width - 2) + "+"
-    _safe_addstr(screen, y, x, rule, curses.A_DIM)
-    _safe_addstr(screen, y + 1, x, "| " + title, curses.A_BOLD)
+    title_text = f"| {'> ' if selected else '  '}{title}"
+    title_text = title_text.ljust(card_width - 1) + "|"
+    title_attr = curses.A_BOLD | (curses.A_REVERSE if selected else 0)
+    rule_attr = curses.A_BOLD if selected else curses.A_DIM
+    _safe_addstr(screen, y, x, rule, rule_attr)
+    _safe_addstr(screen, y + 1, x, title_text, title_attr)
     if not window:
         lines = ("|  Usage unavailable", "|  Reset time unavailable", "|")
     else:
@@ -117,7 +135,7 @@ def _draw_window_card(
         lines = (f"|  {used_text}", f"|  In {remaining_text(reset)}", f"|  {local_time(reset)}")
     for offset, line in enumerate(lines, start=2):
         _safe_addstr(screen, y + offset, x, line)
-    _safe_addstr(screen, y + 5, x, rule, curses.A_DIM)
+    _safe_addstr(screen, y + 5, x, rule, rule_attr)
 
 
 def _terminal_app(screen: Any, executable: str) -> None:
@@ -152,6 +170,10 @@ def _terminal_app(screen: Any, executable: str) -> None:
     export_running = False
     last_updated: float | None = None
     show_history = False
+    show_schedule = False
+    selected_window = 0
+    planned_rows: list[dict[str, Any]] = []
+    selected_slot_index = 0
     history_lines: list[str] = []
     keep_running = True
 
@@ -178,6 +200,19 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 old_resets = new_resets
                 last_updated = updated
                 connection = "Connected to Codex"
+                if show_schedule:
+                    try:
+                        previous_anchor = planned_rows[0]["scheduled_at"] if planned_rows else None
+                        planned_rows = _planned_rows(HistoryStore(), limits)
+                        if planned_rows and previous_anchor is None:
+                            message = "Reset-based plan loaded"
+                            message_attr = curses.color_pair(2) | curses.A_BOLD
+                        elif planned_rows and planned_rows[0]["scheduled_at"] != previous_anchor:
+                            message = "Codex reset changed; anchor and bands shifted with it"
+                            message_attr = curses.color_pair(2) | curses.A_BOLD
+                    except sqlite3.Error as exc:
+                        message = f"Could not load reset time: {exc}"
+                        message_attr = curses.color_pair(3) | curses.A_BOLD
             elif event["kind"] == "ping":
                 message = event["text"]
                 ping_running = event["state"] == "running"
@@ -203,7 +238,57 @@ def _terminal_app(screen: Any, executable: str) -> None:
         now_text = dt.datetime.now().astimezone().strftime("%a %d %b  %H:%M:%S %Z")
         _safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
         _safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
-        if show_history:
+        if show_schedule:
+            _safe_addstr(
+                screen,
+                3,
+                2,
+                "RESET + BANDS · LOCAL PLAN BASED ON THE CODEX 5-HOUR RESET",
+                curses.color_pair(2) | curses.A_BOLD,
+            )
+            if planned_rows:
+                visible_rows = max(1, height - 10)
+                first_row = min(
+                    max(0, selected_slot_index - visible_rows + 1),
+                    max(0, len(planned_rows) - visible_rows),
+                )
+                for index in range(first_row, min(len(planned_rows), first_row + visible_rows)):
+                    slot = planned_rows[index]
+                    scheduled_text = dt.datetime.fromtimestamp(
+                        slot["scheduled_at"], tz=dt.timezone.utc
+                    )
+                    scheduled_text = scheduled_text.astimezone().strftime("%a %d %b  %H:%M %Z")
+                    marker = ">" if index == selected_slot_index else " "
+                    label = "RESET" if index == 0 else f"+BAND {index:02}"
+                    row = (
+                        f"{marker} {label:<9} {scheduled_text}"
+                        f"   ·   in {remaining_text(slot['scheduled_at'])}"
+                    )
+                    attr = curses.A_REVERSE | curses.A_BOLD if index == selected_slot_index else 0
+                    _safe_addstr(screen, 5 + index - first_row, 3, row, attr)
+            else:
+                _safe_addstr(
+                    screen,
+                    5,
+                    3,
+                    "Codex reset time unavailable. Press R to refresh before adding a band.",
+                )
+            _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            _safe_addstr(
+                screen,
+                max(0, height - 3),
+                2,
+                "[↑↓] Select  [←→] Reset ±1h / band ±5m  [+] Add band  [X] Delete band  [S] Back",
+                curses.A_BOLD,
+            )
+            _safe_addstr(
+                screen,
+                max(0, height - 2),
+                2,
+                "Each band is 5h01 after the previous row; changing reset shifts every band.",
+                curses.A_DIM,
+            )
+        elif show_history:
             _safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
             for index, line in enumerate(history_lines[: max(0, height - 9)], start=5):
                 _safe_addstr(screen, index, 3, line)
@@ -212,7 +297,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[H] Back   [E] Export PNG   [R] Refresh   [Q] Quit",
+                "[H] Back   [S] Plan   [E] Export PNG   [R] Refresh   [Q] Quit",
                 curses.A_BOLD,
             )
         else:
@@ -220,16 +305,44 @@ def _terminal_app(screen: Any, executable: str) -> None:
             _safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
             if width >= 70:
                 card_width = (width - 7) // 2
-                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
                 _draw_window_card(
-                    screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                    screen,
+                    2,
+                    5,
+                    card_width,
+                    "5-HOUR WINDOW",
+                    limits.get("primary"),
+                    selected=selected_window == 0,
+                )
+                _draw_window_card(
+                    screen,
+                    card_width + 4,
+                    5,
+                    card_width,
+                    "WEEKLY WINDOW",
+                    limits.get("secondary"),
+                    selected=selected_window == 1,
                 )
                 details_y = 13
             else:
                 card_width = width - 4
-                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
                 _draw_window_card(
-                    screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                    screen,
+                    2,
+                    5,
+                    card_width,
+                    "5-HOUR WINDOW",
+                    limits.get("primary"),
+                    selected=selected_window == 0,
+                )
+                _draw_window_card(
+                    screen,
+                    2,
+                    12,
+                    card_width,
+                    "WEEKLY WINDOW",
+                    limits.get("secondary"),
+                    selected=selected_window == 1,
                 )
                 details_y = 20
 
@@ -250,7 +363,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[P] Ping   [H] History   [E] Export PNG   [R] Refresh   [Q] Quit",
+                "[↑↓] Select row  [P] Ping  [S] Plan  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
             _safe_addstr(
@@ -265,8 +378,86 @@ def _terminal_app(screen: Any, executable: str) -> None:
         key = screen.getch()
         if key in (ord("q"), ord("Q"), 27):
             keep_running = False
+        elif show_schedule and key == curses.KEY_UP:
+            selected_slot_index = max(0, selected_slot_index - 1)
+        elif show_schedule and key == curses.KEY_DOWN:
+            selected_slot_index = min(max(0, len(planned_rows) - 1), selected_slot_index + 1)
+        elif show_schedule and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            if not planned_rows:
+                message = "Reset time unavailable. Press R to refresh."
+                message_attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                try:
+                    store = HistoryStore()
+                    if selected_slot_index == 0:
+                        shift = 3600 if key == curses.KEY_RIGHT else -3600
+                        store.shift_plan_anchor(shift)
+                        planned_rows = _planned_rows(store, limits)
+                        direction = "later" if shift > 0 else "earlier"
+                        message = f"Planned reset and all bands moved one hour {direction}"
+                    else:
+                        shift = 300 if key == curses.KEY_RIGHT else -300
+                        store.shift_planned_slots(planned_rows[selected_slot_index]["id"], shift)
+                        planned_rows = _planned_rows(store, limits)
+                        direction = "later" if shift > 0 else "earlier"
+                        message = f"Selected band and later bands moved 5 minutes {direction}"
+                    message_attr = curses.color_pair(2) | curses.A_BOLD
+                except sqlite3.Error as exc:
+                    message = f"Could not move planned time: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("+"), ord("a"), ord("A")):
+            if not planned_rows:
+                message = "Reset time unavailable. Press R to refresh before adding a band."
+                message_attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                try:
+                    store = HistoryStore()
+                    store.add_planned_slot(anchor_at=planned_rows[0]["scheduled_at"])
+                    planned_rows = _planned_rows(store, limits)
+                    selected_slot_index = len(planned_rows) - 1
+                    message = "Added band 5h01 after the previous row"
+                    message_attr = curses.color_pair(2) | curses.A_BOLD
+                except sqlite3.Error as exc:
+                    message = f"Could not add band: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("x"), ord("X")) and selected_slot_index > 0:
+            try:
+                store = HistoryStore()
+                store.delete_planned_slot(planned_rows[selected_slot_index]["id"])
+                planned_rows = _planned_rows(store, limits)
+                selected_slot_index = min(selected_slot_index, max(0, len(planned_rows) - 1))
+                message = "Deleted selected band"
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                message = f"Could not delete band: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif key in (ord("s"), ord("S")):
+            show_schedule = not show_schedule
+            show_history = False
+            if show_schedule:
+                try:
+                    planned_rows = _planned_rows(HistoryStore(), limits)
+                    selected_slot_index = min(selected_slot_index, max(0, len(planned_rows) - 1))
+                    message = (
+                        "Reset-based plan opened"
+                        if planned_rows
+                        else "Reset time unavailable. Press R to refresh."
+                    )
+                    message_attr = curses.A_DIM if planned_rows else curses.color_pair(4)
+                except sqlite3.Error as exc:
+                    planned_rows = []
+                    message = f"Could not read planned slots: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+            else:
+                message = "Usage dashboard"
+                message_attr = curses.A_DIM
+        elif key in (curses.KEY_UP, curses.KEY_LEFT) and not show_history:
+            selected_window = 0
+        elif key in (curses.KEY_DOWN, curses.KEY_RIGHT) and not show_history:
+            selected_window = 1
         elif key in (ord("h"), ord("H")):
             show_history = not show_history
+            show_schedule = False
             if show_history:
                 try:
                     history_lines = render_histogram(HistoryStore().history(14), width - 6)

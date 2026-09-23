@@ -13,6 +13,7 @@ from typing import Any
 from .usage import window_rows
 
 RETENTION_DAYS = 90
+DEFAULT_PLAN_INTERVAL_SECONDS = 5 * 3600 + 60
 
 
 def default_data_dir() -> Path:
@@ -71,6 +72,18 @@ class HistoryStore:
                     current_streak_days INTEGER,
                     longest_streak_days INTEGER,
                     longest_running_turn_sec INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS planned_slots (
+                    id INTEGER PRIMARY KEY,
+                    position INTEGER NOT NULL UNIQUE,
+                    scheduled_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS plan_settings (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    reset_anchor_at REAL NOT NULL,
+                    source_reset_at REAL
                 );
                 """
             )
@@ -183,6 +196,133 @@ class HistoryStore:
             "summary": dict(summary) if summary else None,
             "days": days,
         }
+
+    def planned_slots(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, position, scheduled_at FROM planned_slots ORDER BY position"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def plan_anchor(self) -> float | None:
+        with self._connect() as db:
+            row = db.execute("SELECT reset_anchor_at FROM plan_settings WHERE id = 1").fetchone()
+        return row["reset_anchor_at"] if row else None
+
+    def ensure_plan_anchor(self, reset_at: float | None) -> float | None:
+        """Persist the server reset as the plan anchor, preserving existing bands."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT reset_anchor_at, source_reset_at FROM plan_settings WHERE id = 1"
+            ).fetchone()
+            if row:
+                anchor_at = row["reset_anchor_at"]
+                source_reset_at = row["source_reset_at"]
+                if reset_at is not None and source_reset_at is None:
+                    db.execute(
+                        "UPDATE plan_settings SET source_reset_at = ? WHERE id = 1", (reset_at,)
+                    )
+                elif reset_at is not None and reset_at != source_reset_at:
+                    shift = reset_at - source_reset_at
+                    anchor_at += shift
+                    db.execute(
+                        "UPDATE plan_settings SET reset_anchor_at = ?, source_reset_at = ? "
+                        "WHERE id = 1",
+                        (anchor_at, reset_at),
+                    )
+                    db.execute("UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (shift,))
+                return anchor_at
+
+            bands = db.execute(
+                "SELECT scheduled_at FROM planned_slots ORDER BY position LIMIT 1"
+            ).fetchone()
+            if bands:
+                inferred_anchor = bands["scheduled_at"] - DEFAULT_PLAN_INTERVAL_SECONDS
+                anchor_at = reset_at if reset_at is not None else inferred_anchor
+                db.execute(
+                    "UPDATE planned_slots SET scheduled_at = scheduled_at + ?",
+                    (anchor_at - inferred_anchor,),
+                )
+            elif reset_at is not None:
+                anchor_at = reset_at
+            else:
+                return None
+
+            db.execute(
+                "INSERT INTO plan_settings (id, reset_anchor_at, source_reset_at) VALUES (1, ?, ?)",
+                (anchor_at, reset_at),
+            )
+        return anchor_at
+
+    def shift_plan_anchor(self, offset_seconds: int) -> float | None:
+        with self._connect() as db:
+            row = db.execute("SELECT reset_anchor_at FROM plan_settings WHERE id = 1").fetchone()
+            if row is None:
+                return None
+            anchor_at = row["reset_anchor_at"] + offset_seconds
+            db.execute("UPDATE plan_settings SET reset_anchor_at = ? WHERE id = 1", (anchor_at,))
+            db.execute(
+                "UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (offset_seconds,)
+            )
+        return anchor_at
+
+    def add_planned_slot(
+        self,
+        now: float | None = None,
+        interval_seconds: int = DEFAULT_PLAN_INTERVAL_SECONDS,
+        anchor_at: float | None = None,
+    ) -> dict[str, Any]:
+        if now is None:
+            now = time.time()
+        with self._connect() as db:
+            previous = db.execute(
+                "SELECT position, scheduled_at FROM planned_slots ORDER BY position DESC LIMIT 1"
+            ).fetchone()
+            if anchor_at is None:
+                anchor = db.execute(
+                    "SELECT reset_anchor_at FROM plan_settings WHERE id = 1"
+                ).fetchone()
+                anchor_at = anchor["reset_anchor_at"] if anchor else None
+            position = previous["position"] + 1 if previous else 0
+            scheduled_at = (
+                previous["scheduled_at"] + interval_seconds
+                if previous
+                else (anchor_at if anchor_at is not None else now) + interval_seconds
+            )
+            cursor = db.execute(
+                "INSERT INTO planned_slots (position, scheduled_at) VALUES (?, ?)",
+                (position, scheduled_at),
+            )
+            slot_id = cursor.lastrowid
+        return {"id": slot_id, "position": position, "scheduled_at": scheduled_at}
+
+    def shift_planned_slots(self, slot_id: int, offset_seconds: int) -> int:
+        with self._connect() as db:
+            slot = db.execute(
+                "SELECT position FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if slot is None:
+                return 0
+            cursor = db.execute(
+                "UPDATE planned_slots SET scheduled_at = scheduled_at + ? WHERE position >= ?",
+                (offset_seconds, slot["position"]),
+            )
+        return cursor.rowcount
+
+    def delete_planned_slot(self, slot_id: int) -> bool:
+        with self._connect() as db:
+            slot = db.execute(
+                "SELECT position FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if slot is None:
+                return False
+            db.execute("DELETE FROM planned_slots WHERE id = ?", (slot_id,))
+            db.execute(
+                "UPDATE planned_slots SET position = -position - 1 WHERE position > ?",
+                (slot["position"],),
+            )
+            db.execute("UPDATE planned_slots SET position = -position - 2 WHERE position < -1")
+        return True
 
     def _prune(self, db: sqlite3.Connection, now: float) -> None:
         cutoff = now - self.retention_days * 86400
