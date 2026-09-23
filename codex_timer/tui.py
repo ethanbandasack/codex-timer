@@ -16,6 +16,20 @@ from .histogram import render_histogram, render_hourly_histogram
 from .history import DEFAULT_PLAN_INTERVAL_SECONDS, HistoryStore, capture_history
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
+AUTO_PING_GRACE_SECONDS = 60
+
+
+def _due_planned_slots(
+    slots: list[dict[str, Any]], previous_check: float, checked_at: float
+) -> list[dict[str, Any]]:
+    """Return bands crossed since the prior check, skipping stale missed times."""
+    return [
+        slot
+        for slot in slots
+        if previous_check < slot["scheduled_at"] <= checked_at
+        and checked_at - slot["scheduled_at"] < AUTO_PING_GRACE_SECONDS
+    ]
+
 
 class UsageWorker(threading.Thread):
     """Keep Codex I/O off the UI thread and publish updates through a queue."""
@@ -38,29 +52,36 @@ class UsageWorker(threading.Thread):
                     self.emit("connection", text="Connected to Codex")
                     self._refresh(server, history)
                     next_poll = time.monotonic() + 60
+                    next_auto_check = time.monotonic() + 1
+                    last_auto_check = time.time()
                     while not self.stopping.is_set():
                         try:
-                            action = self.actions.get(
-                                timeout=max(0.1, next_poll - time.monotonic())
+                            timeout = max(
+                                0.1,
+                                min(next_poll, next_auto_check) - time.monotonic(),
                             )
+                            action = self.actions.get(timeout=timeout)
                         except queue.Empty:
-                            action = "refresh"
+                            action = ""
                         if action == "stop":
                             return
                         if action == "ping":
-                            self.emit("ping", state="running", text="Sending one-word hello…")
-                            try:
-                                used_model = server.ping(DEFAULT_MODEL, DEFAULT_EFFORT, timeout=30)
-                                self.emit(
-                                    "ping",
-                                    state="done",
-                                    text=f"Hello sent with {used_model}; temporary chat closed.",
-                                )
-                            except (RuntimeError, TimeoutError, OSError) as exc:
-                                self.emit("ping", state="error", text=f"Ping failed: {exc}")
-                        if action in ("refresh", "ping"):
+                            self._ping(server, history, automatic=False)
+                            next_poll = time.monotonic() + 60
+                        elif action == "refresh" or time.monotonic() >= next_poll:
                             self._refresh(server, history)
                             next_poll = time.monotonic() + 60
+                        if time.monotonic() >= next_auto_check:
+                            checked_at = time.time()
+                            if history.auto_ping_enabled():
+                                for slot in _due_planned_slots(
+                                    history.planned_slots(), last_auto_check, checked_at
+                                ):
+                                    scheduled_at = slot["scheduled_at"]
+                                    if history.claim_planned_ping(slot["id"], scheduled_at):
+                                        self._ping(server, history, automatic=True)
+                            last_auto_check = checked_at
+                            next_auto_check = time.monotonic() + 1
             except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
                 self.emit("connection", text=f"Codex unavailable: {exc}")
                 if self.stopping.wait(10):
@@ -69,9 +90,38 @@ class UsageWorker(threading.Thread):
     def _refresh(self, server: CodexServer, history: HistoryStore) -> None:
         try:
             limits = capture_history(server, history)
+            primary = limits.get("primary") or {}
+            reset_at = primary.get("resetsAt")
+            if isinstance(reset_at, (int, float)):
+                history.ensure_plan_anchor(reset_at)
             self.emit("limits", limits=limits, updated=time.time())
         except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
             self.emit("connection", text=f"Could not refresh: {exc}")
+
+    def _ping(self, server: CodexServer, history: HistoryStore, automatic: bool) -> None:
+        prefix = "Scheduled " if automatic else ""
+        self.emit(
+            "ping",
+            state="running",
+            automatic=automatic,
+            text=f"Sending {prefix}one-word hello…",
+        )
+        try:
+            used_model = server.ping(DEFAULT_MODEL, DEFAULT_EFFORT, timeout=30)
+            self.emit(
+                "ping",
+                state="done",
+                automatic=automatic,
+                text=f"{prefix}hello sent with {used_model}; temporary chat closed.",
+            )
+        except (RuntimeError, TimeoutError, OSError) as exc:
+            self.emit(
+                "ping",
+                state="error",
+                automatic=automatic,
+                text=f"{prefix}ping failed: {exc}",
+            )
+        self._refresh(server, history)
 
     def stop(self) -> None:
         self.stopping.set()
@@ -178,14 +228,13 @@ def _draw_window_card(
     width: int,
     title: str,
     window: dict[str, Any] | None,
-    selected: bool = False,
 ) -> None:
     card_width = max(16, min(width, screen.getmaxyx()[1] - x - 1))
     rule = "+" + "-" * (card_width - 2) + "+"
-    title_text = f"| {'> ' if selected else '  '}{title}"
+    title_text = f"|  {title}"
     title_text = title_text.ljust(card_width - 1) + "|"
-    title_attr = curses.A_BOLD | (curses.A_REVERSE if selected else 0)
-    rule_attr = curses.A_BOLD if selected else curses.A_DIM
+    title_attr = curses.A_BOLD
+    rule_attr = curses.A_DIM
     _safe_addstr(screen, y, x, rule, rule_attr)
     _safe_addstr(screen, y + 1, x, title_text, title_attr)
     if not window:
@@ -234,7 +283,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     show_history = False
     history_hourly = False
     show_schedule = False
-    selected_window = 0
+    auto_ping_enabled = HistoryStore().auto_ping_enabled()
     planned_rows: list[dict[str, Any]] = []
     selected_slot_index = 0
     planned_interval = DEFAULT_PLAN_INTERVAL_SECONDS
@@ -310,7 +359,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 3,
                 2,
-                f"RESET + BANDS · LOCAL PLAN · BAND INTERVAL {interval_label}",
+                f"RESET + BANDS · AUTO PING {'ON' if auto_ping_enabled else 'OFF'} · INTERVAL {interval_label}",
                 curses.color_pair(2) | curses.A_BOLD,
             )
             if planned_rows:
@@ -357,7 +406,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[E] Exact date/time  [I] Set interval  [+] Add  [X] Delete  [0] Clear all bands",
+                "[E] Exact time  [I] Interval  [+] Add  [X] Delete  [0] Clear  [A] Auto ping",
                 curses.A_BOLD,
             )
             _safe_addstr(
@@ -377,7 +426,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[T] Toggle view  [H] Back  [S] Plan  [E] PNG  [R] Refresh  [Q] Quit",
+                "[T] View  [H] Back  [S] Plan  [A] Auto ping  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
         else:
@@ -392,7 +441,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     card_width,
                     "5-HOUR WINDOW",
                     limits.get("primary"),
-                    selected=selected_window == 0,
                 )
                 _draw_window_card(
                     screen,
@@ -401,7 +449,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     card_width,
                     "WEEKLY WINDOW",
                     limits.get("secondary"),
-                    selected=selected_window == 1,
                 )
                 details_y = 13
             else:
@@ -413,7 +460,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     card_width,
                     "5-HOUR WINDOW",
                     limits.get("primary"),
-                    selected=selected_window == 0,
                 )
                 _draw_window_card(
                     screen,
@@ -422,7 +468,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     card_width,
                     "WEEKLY WINDOW",
                     limits.get("secondary"),
-                    selected=selected_window == 1,
                 )
                 details_y = 20
 
@@ -443,14 +488,14 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[↑↓] Select row  [P] Ping  [S] Plan  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
+                "[P] Ping  [A] Auto ping  [S] Plan  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
             _safe_addstr(
                 screen,
                 max(0, height - 2),
                 2,
-                "Server reset times · automatic refresh every 60s",
+                f"Auto ping {'ON' if auto_ping_enabled else 'OFF'} · runs while this app stays open · refresh every 60s",
                 curses.A_DIM,
             )
         screen.refresh()
@@ -549,7 +594,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 except (ValueError, sqlite3.Error) as exc:
                     message = f"Invalid band interval: {exc}"
                     message_attr = curses.color_pair(3) | curses.A_BOLD
-        elif show_schedule and key in (ord("+"), ord("a"), ord("A")):
+        elif show_schedule and key == ord("+"):
             if not planned_rows:
                 message = "Reset time unavailable. Press R to refresh before adding a band."
                 message_attr = curses.color_pair(4) | curses.A_BOLD
@@ -565,6 +610,20 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 except sqlite3.Error as exc:
                     message = f"Could not add band: {exc}"
                     message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif key in (ord("a"), ord("A")):
+            auto_ping_enabled = not auto_ping_enabled
+            try:
+                HistoryStore().set_auto_ping_enabled(auto_ping_enabled)
+                message = (
+                    "Automatic pings enabled for planned bands"
+                    if auto_ping_enabled
+                    else "Automatic pings paused"
+                )
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                auto_ping_enabled = not auto_ping_enabled
+                message = f"Could not save auto ping setting: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
         elif show_schedule and key in (ord("x"), ord("X")) and selected_slot_index > 0:
             try:
                 store = HistoryStore()
@@ -610,10 +669,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
             else:
                 message = "Usage dashboard"
                 message_attr = curses.A_DIM
-        elif key in (curses.KEY_UP, curses.KEY_LEFT) and not show_history:
-            selected_window = 0
-        elif key in (curses.KEY_DOWN, curses.KEY_RIGHT) and not show_history:
-            selected_window = 1
         elif key in (ord("h"), ord("H")):
             show_history = not show_history
             show_schedule = False

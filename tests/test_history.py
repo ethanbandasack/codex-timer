@@ -30,6 +30,25 @@ class FakeUsageSource:
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_automatic_pings_default_off_and_attempts_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = HistoryStore(Path(temp_dir) / "history.sqlite3")
+            enabled_by_default = store.auto_ping_enabled()
+            store.set_auto_ping_enabled(True)
+            enabled_after_save = HistoryStore(store.path).auto_ping_enabled()
+            first_claim = store.claim_planned_ping(7, 12_345, attempted_at=12_346)
+            duplicate_claim = store.claim_planned_ping(7, 12_345, attempted_at=12_347)
+            duplicate_after_reschedule = store.claim_planned_ping(7, 12_400, attempted_at=12_401)
+            store.clear_planned_slots()
+            claim_after_clear = store.claim_planned_ping(7, 12_345, attempted_at=12_402)
+
+        self.assertFalse(enabled_by_default)
+        self.assertTrue(enabled_after_save)
+        self.assertTrue(first_claim)
+        self.assertFalse(duplicate_claim)
+        self.assertFalse(duplicate_after_reschedule)
+        self.assertTrue(claim_after_clear)
+
     def test_local_session_import_stores_only_token_metadata_and_is_incremental(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
