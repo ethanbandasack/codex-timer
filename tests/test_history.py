@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_timer.history import HistoryStore, capture_history
+from codex_timer.history import DEFAULT_PLAN_INTERVAL_SECONDS, HistoryStore, capture_history
 
 
 class FakeUsageSource:
@@ -49,6 +49,37 @@ class HistoryStoreTests(unittest.TestCase):
 
         self.assertEqual(len(history["daily"]), 1)
         self.assertEqual(history["daily"][0]["tokens"], 30)
+
+    def test_planned_slots_default_to_five_hours_one_minute_and_shift_later_slots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = HistoryStore(Path(temp_dir) / "history.sqlite3")
+            first = store.add_planned_slot(now=1_000)
+            second = store.add_planned_slot(now=1_000)
+            third = store.add_planned_slot(now=1_000)
+
+            store.shift_planned_slots(second["id"], 300)
+            slots = store.planned_slots()
+
+        self.assertEqual(first["scheduled_at"], 1_000 + DEFAULT_PLAN_INTERVAL_SECONDS)
+        self.assertEqual(
+            second["scheduled_at"], first["scheduled_at"] + DEFAULT_PLAN_INTERVAL_SECONDS
+        )
+        self.assertEqual(slots[0]["scheduled_at"], first["scheduled_at"])
+        self.assertEqual(slots[1]["scheduled_at"], second["scheduled_at"] + 300)
+        self.assertEqual(slots[2]["scheduled_at"], third["scheduled_at"] + 300)
+
+    def test_deleting_planned_slot_reindexes_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = HistoryStore(Path(temp_dir) / "history.sqlite3")
+            first = store.add_planned_slot(now=1_000)
+            second = store.add_planned_slot(now=1_000)
+            third = store.add_planned_slot(now=1_000)
+
+            self.assertTrue(store.delete_planned_slot(second["id"]))
+            slots = store.planned_slots()
+
+        self.assertEqual([slot["position"] for slot in slots], [0, 1])
+        self.assertEqual([slot["id"] for slot in slots], [first["id"], third["id"]])
 
 
 if __name__ == "__main__":

@@ -103,11 +103,16 @@ def _draw_window_card(
     width: int,
     title: str,
     window: dict[str, Any] | None,
+    selected: bool = False,
 ) -> None:
     card_width = max(16, min(width, screen.getmaxyx()[1] - x - 1))
     rule = "+" + "-" * (card_width - 2) + "+"
-    _safe_addstr(screen, y, x, rule, curses.A_DIM)
-    _safe_addstr(screen, y + 1, x, "| " + title, curses.A_BOLD)
+    title_text = f"| {'> ' if selected else '  '}{title}"
+    title_text = title_text.ljust(card_width - 1) + "|"
+    title_attr = curses.A_BOLD | (curses.A_REVERSE if selected else 0)
+    rule_attr = curses.A_BOLD if selected else curses.A_DIM
+    _safe_addstr(screen, y, x, rule, rule_attr)
+    _safe_addstr(screen, y + 1, x, title_text, title_attr)
     if not window:
         lines = ("|  Usage unavailable", "|  Reset time unavailable", "|")
     else:
@@ -117,7 +122,7 @@ def _draw_window_card(
         lines = (f"|  {used_text}", f"|  In {remaining_text(reset)}", f"|  {local_time(reset)}")
     for offset, line in enumerate(lines, start=2):
         _safe_addstr(screen, y + offset, x, line)
-    _safe_addstr(screen, y + 5, x, rule, curses.A_DIM)
+    _safe_addstr(screen, y + 5, x, rule, rule_attr)
 
 
 def _terminal_app(screen: Any, executable: str) -> None:
@@ -152,6 +157,10 @@ def _terminal_app(screen: Any, executable: str) -> None:
     export_running = False
     last_updated: float | None = None
     show_history = False
+    show_schedule = False
+    selected_window = 0
+    planned_slots: list[dict[str, Any]] = []
+    selected_slot_index = 0
     history_lines: list[str] = []
     keep_running = True
 
@@ -203,7 +212,53 @@ def _terminal_app(screen: Any, executable: str) -> None:
         now_text = dt.datetime.now().astimezone().strftime("%a %d %b  %H:%M:%S %Z")
         _safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
         _safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
-        if show_history:
+        if show_schedule:
+            _safe_addstr(
+                screen,
+                3,
+                2,
+                "PLANNED SLOTS · LOCAL ONLY, SEPARATE FROM CODEX RESET TIMES",
+                curses.color_pair(2) | curses.A_BOLD,
+            )
+            if planned_slots:
+                visible_rows = max(1, height - 10)
+                first_row = min(
+                    max(0, selected_slot_index - visible_rows + 1),
+                    max(0, len(planned_slots) - visible_rows),
+                )
+                for index in range(first_row, min(len(planned_slots), first_row + visible_rows)):
+                    slot = planned_slots[index]
+                    scheduled_text = dt.datetime.fromtimestamp(
+                        slot["scheduled_at"], tz=dt.timezone.utc
+                    )
+                    scheduled_text = scheduled_text.astimezone().strftime("%a %d %b  %H:%M %Z")
+                    marker = ">" if index == selected_slot_index else " "
+                    row = (
+                        f"{marker} {index + 1:02}   {scheduled_text}"
+                        f"   ·   in {remaining_text(slot['scheduled_at'])}"
+                    )
+                    attr = curses.A_REVERSE | curses.A_BOLD if index == selected_slot_index else 0
+                    _safe_addstr(screen, 5 + index - first_row, 3, row, attr)
+            else:
+                _safe_addstr(
+                    screen, 5, 3, "No planned slots yet. Press A to add one 5h01 from now."
+                )
+            _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            _safe_addstr(
+                screen,
+                max(0, height - 3),
+                2,
+                "[↑↓] Select  [←→] Shift this and later slots 5m  [A] Add +5h01  [X] Delete  [S] Back",
+                curses.A_BOLD,
+            )
+            _safe_addstr(
+                screen,
+                max(0, height - 2),
+                2,
+                "Each new slot is 5h01 after the previous one; planned slots do not trigger pings.",
+                curses.A_DIM,
+            )
+        elif show_history:
             _safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
             for index, line in enumerate(history_lines[: max(0, height - 9)], start=5):
                 _safe_addstr(screen, index, 3, line)
@@ -212,7 +267,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[H] Back   [E] Export PNG   [R] Refresh   [Q] Quit",
+                "[H] Back   [S] Plan   [E] Export PNG   [R] Refresh   [Q] Quit",
                 curses.A_BOLD,
             )
         else:
@@ -220,16 +275,44 @@ def _terminal_app(screen: Any, executable: str) -> None:
             _safe_addstr(screen, 3, 2, connection, curses.color_pair(2 if online else 4))
             if width >= 70:
                 card_width = (width - 7) // 2
-                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
                 _draw_window_card(
-                    screen, card_width + 4, 5, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                    screen,
+                    2,
+                    5,
+                    card_width,
+                    "5-HOUR WINDOW",
+                    limits.get("primary"),
+                    selected=selected_window == 0,
+                )
+                _draw_window_card(
+                    screen,
+                    card_width + 4,
+                    5,
+                    card_width,
+                    "WEEKLY WINDOW",
+                    limits.get("secondary"),
+                    selected=selected_window == 1,
                 )
                 details_y = 13
             else:
                 card_width = width - 4
-                _draw_window_card(screen, 2, 5, card_width, "5-HOUR WINDOW", limits.get("primary"))
                 _draw_window_card(
-                    screen, 2, 12, card_width, "WEEKLY WINDOW", limits.get("secondary")
+                    screen,
+                    2,
+                    5,
+                    card_width,
+                    "5-HOUR WINDOW",
+                    limits.get("primary"),
+                    selected=selected_window == 0,
+                )
+                _draw_window_card(
+                    screen,
+                    2,
+                    12,
+                    card_width,
+                    "WEEKLY WINDOW",
+                    limits.get("secondary"),
+                    selected=selected_window == 1,
                 )
                 details_y = 20
 
@@ -250,7 +333,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[P] Ping   [H] History   [E] Export PNG   [R] Refresh   [Q] Quit",
+                "[↑↓] Select row  [P] Ping  [S] Plan  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
             _safe_addstr(
@@ -265,8 +348,67 @@ def _terminal_app(screen: Any, executable: str) -> None:
         key = screen.getch()
         if key in (ord("q"), ord("Q"), 27):
             keep_running = False
+        elif show_schedule and key == curses.KEY_UP:
+            selected_slot_index = max(0, selected_slot_index - 1)
+        elif show_schedule and key == curses.KEY_DOWN:
+            selected_slot_index = min(max(0, len(planned_slots) - 1), selected_slot_index + 1)
+        elif show_schedule and key in (curses.KEY_LEFT, curses.KEY_RIGHT) and planned_slots:
+            try:
+                shift = 300 if key == curses.KEY_RIGHT else -300
+                store = HistoryStore()
+                store.shift_planned_slots(planned_slots[selected_slot_index]["id"], shift)
+                planned_slots = store.planned_slots()
+                direction = "later" if shift > 0 else "earlier"
+                message = f"Selected slot and later slots moved 5 minutes {direction}"
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                message = f"Could not move planned slot: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("a"), ord("A")):
+            try:
+                store = HistoryStore()
+                store.add_planned_slot()
+                planned_slots = store.planned_slots()
+                selected_slot_index = len(planned_slots) - 1
+                message = "Added planned slot"
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                message = f"Could not add planned slot: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("x"), ord("X")) and planned_slots:
+            try:
+                store = HistoryStore()
+                store.delete_planned_slot(planned_slots[selected_slot_index]["id"])
+                planned_slots = store.planned_slots()
+                selected_slot_index = min(selected_slot_index, max(0, len(planned_slots) - 1))
+                message = "Deleted planned slot"
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                message = f"Could not delete planned slot: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif key in (ord("s"), ord("S")):
+            show_schedule = not show_schedule
+            show_history = False
+            if show_schedule:
+                try:
+                    planned_slots = HistoryStore().planned_slots()
+                    selected_slot_index = min(selected_slot_index, max(0, len(planned_slots) - 1))
+                    message = "Local plan opened"
+                    message_attr = curses.A_DIM
+                except sqlite3.Error as exc:
+                    planned_slots = []
+                    message = f"Could not read planned slots: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+            else:
+                message = "Usage dashboard"
+                message_attr = curses.A_DIM
+        elif key in (curses.KEY_UP, curses.KEY_LEFT) and not show_history:
+            selected_window = 0
+        elif key in (curses.KEY_DOWN, curses.KEY_RIGHT) and not show_history:
+            selected_window = 1
         elif key in (ord("h"), ord("H")):
             show_history = not show_history
+            show_schedule = False
             if show_history:
                 try:
                     history_lines = render_histogram(HistoryStore().history(14), width - 6)

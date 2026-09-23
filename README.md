@@ -16,12 +16,14 @@ Keyboard controls:
 
 - `P` sends a one-word hello using `gpt-5.6-luna` at low effort, then closes the in-memory chat.
 - `R` refreshes usage immediately.
+- `S` opens the local plan. In the plan, `A` adds a slot 5h01 from now (or 5h01 after the last slot), `↑`/`↓` select a slot, `←`/`→` shift it and all later slots by five minutes, and `X` deletes it.
 - `H` opens the local consumption history.
 - `Q` or `Esc` exits.
 
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
 
 The app records quota usage snapshots and Codex's daily token-activity totals locally. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
+Planned slots are also stored locally in that database. They are schedule notes only: they do not change Codex's server-reported reset times or send pings automatically.
 
 ## Terminal commands
 

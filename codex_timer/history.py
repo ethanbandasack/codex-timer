@@ -13,6 +13,7 @@ from typing import Any
 from .usage import window_rows
 
 RETENTION_DAYS = 90
+DEFAULT_PLAN_INTERVAL_SECONDS = 5 * 3600 + 60
 
 
 def default_data_dir() -> Path:
@@ -71,6 +72,12 @@ class HistoryStore:
                     current_streak_days INTEGER,
                     longest_streak_days INTEGER,
                     longest_running_turn_sec INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS planned_slots (
+                    id INTEGER PRIMARY KEY,
+                    position INTEGER NOT NULL UNIQUE,
+                    scheduled_at REAL NOT NULL
                 );
                 """
             )
@@ -183,6 +190,63 @@ class HistoryStore:
             "summary": dict(summary) if summary else None,
             "days": days,
         }
+
+    def planned_slots(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, position, scheduled_at FROM planned_slots ORDER BY position"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_planned_slot(
+        self,
+        now: float | None = None,
+        interval_seconds: int = DEFAULT_PLAN_INTERVAL_SECONDS,
+    ) -> dict[str, Any]:
+        if now is None:
+            now = time.time()
+        with self._connect() as db:
+            previous = db.execute(
+                "SELECT position, scheduled_at FROM planned_slots ORDER BY position DESC LIMIT 1"
+            ).fetchone()
+            position = previous["position"] + 1 if previous else 0
+            scheduled_at = (
+                previous["scheduled_at"] + interval_seconds if previous else now + interval_seconds
+            )
+            cursor = db.execute(
+                "INSERT INTO planned_slots (position, scheduled_at) VALUES (?, ?)",
+                (position, scheduled_at),
+            )
+            slot_id = cursor.lastrowid
+        return {"id": slot_id, "position": position, "scheduled_at": scheduled_at}
+
+    def shift_planned_slots(self, slot_id: int, offset_seconds: int) -> int:
+        with self._connect() as db:
+            slot = db.execute(
+                "SELECT position FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if slot is None:
+                return 0
+            cursor = db.execute(
+                "UPDATE planned_slots SET scheduled_at = scheduled_at + ? WHERE position >= ?",
+                (offset_seconds, slot["position"]),
+            )
+        return cursor.rowcount
+
+    def delete_planned_slot(self, slot_id: int) -> bool:
+        with self._connect() as db:
+            slot = db.execute(
+                "SELECT position FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if slot is None:
+                return False
+            db.execute("DELETE FROM planned_slots WHERE id = ?", (slot_id,))
+            db.execute(
+                "UPDATE planned_slots SET position = -position - 1 WHERE position > ?",
+                (slot["position"],),
+            )
+            db.execute("UPDATE planned_slots SET position = -position - 2 WHERE position < -1")
+        return True
 
     def _prune(self, db: sqlite3.Connection, now: float) -> None:
         cutoff = now - self.retention_days * 86400
