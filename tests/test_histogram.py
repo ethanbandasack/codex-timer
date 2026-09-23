@@ -1,6 +1,6 @@
 import unittest
 
-from codex_timer.histogram import render_histogram
+from codex_timer.histogram import render_histogram, render_hourly_histogram
 
 
 class HistogramTests(unittest.TestCase):
@@ -33,6 +33,28 @@ class HistogramTests(unittest.TestCase):
 
         self.assertIn("token activity not available yet", lines[0])
         self.assertIn("50.0%", lines[2])
+
+    def test_hourly_histogram_sums_local_events_into_recent_hours(self):
+        now = 1_800_000_000
+        current_hour = int(now // 3600) * 3600
+        now = current_hour + 600
+        lines = render_hourly_histogram(
+            {
+                "local_tokens": [
+                    {"captured_at": current_hour + 120, "total_tokens": 100},
+                    {"captured_at": current_hour + 180, "total_tokens": 200},
+                    {"captured_at": current_hour - 3600 + 150, "total_tokens": 150},
+                ]
+            },
+            width=60,
+            hours=2,
+            now=now,
+        )
+
+        self.assertIn("last 2 hours", lines[0])
+        self.assertIn("150", lines[2])
+        self.assertIn("300", lines[3])
+        self.assertIn("local Codex session logs", lines[-2])
 
 
 if __name__ == "__main__":

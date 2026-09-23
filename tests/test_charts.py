@@ -26,6 +26,24 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(series["quota"]["5-hour"][0][1], 20.0)
         self.assertEqual(series["quota"]["weekly"][0][1], 45.0)
 
+    def test_chart_series_adds_local_tokens_into_hourly_buckets(self):
+        series = chart_series(
+            {
+                "local_tokens": [
+                    {"captured_at": 1_800_000_001, "total_tokens": 10},
+                    {"captured_at": 1_800_000_200, "total_tokens": 20},
+                    {"captured_at": 1_800_007_200, "total_tokens": 30},
+                ]
+            },
+            now=1_800_007_200,
+        )
+
+        hourly = dict(series["hourly"])
+        self.assertEqual(len(hourly), 72)
+        self.assertEqual(hourly[1_800_000_000], 30)
+        self.assertEqual(hourly[1_800_003_600], 0)
+        self.assertEqual(hourly[1_800_007_200], 30)
+
     def test_export_writes_a_valid_png_without_optional_packages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "usage.png"
@@ -47,7 +65,7 @@ class ChartTests(unittest.TestCase):
 
         self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(data[12:16], b"IHDR")
-        self.assertEqual(struct.unpack(">II", data[16:24]), (1200, 760))
+        self.assertEqual(struct.unpack(">II", data[16:24]), (2400, 1960))
         self.assertIn(b"IDAT", data)
         self.assertTrue(zlib.decompress(data[data.index(b"IDAT") + 4 : -16]))
 

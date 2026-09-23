@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .charts import ChartDependencyError, default_export_path, export_chart
-from .histogram import render_histogram
+from .histogram import render_histogram, render_hourly_histogram
 from .history import HistoryStore, capture_history
 from .tui import run_terminal_app
 from .usage import print_status, watch
@@ -34,6 +34,11 @@ def make_parser() -> argparse.ArgumentParser:
 
     history = commands.add_parser("history", help="Show the local terminal usage histogram.")
     history.add_argument("--days", type=int, default=14, help="History period (1 to 365 days).")
+    history.add_argument(
+        "--hourly",
+        action="store_true",
+        help="Show local per-hour token counts for the last 24 hours.",
+    )
 
     export = commands.add_parser("export", help="Export local usage curves as a PNG chart.")
     export.add_argument("--days", type=int, default=30, help="History period (1 to 365 days).")
@@ -54,14 +59,26 @@ def main() -> int:
         return 2
 
     if args.command == "history":
-        store = HistoryStore()
-        report = store.history(args.days)
-        print("\n".join(render_histogram(report, shutil.get_terminal_size((80, 24)).columns)))
+        try:
+            store = HistoryStore()
+            store.record_local_session_usage()
+            report = store.history(2 if args.hourly else args.days)
+            width = shutil.get_terminal_size((80, 24)).columns
+            lines = (
+                render_hourly_histogram(report, width)
+                if args.hourly
+                else render_histogram(report, width)
+            )
+        except (OSError, sqlite3.Error) as exc:
+            print(f"Could not read usage history: {exc}", file=sys.stderr)
+            return 1
+        print("\n".join(lines))
         print(f"\nHistory database: {store.path}")
         return 0
     if args.command == "export":
         try:
             store = HistoryStore()
+            store.record_local_session_usage()
             output = export_chart(store.history(args.days), args.output or default_export_path())
         except ChartDependencyError as exc:
             print(f"Codex Timer: {exc}", file=sys.stderr)

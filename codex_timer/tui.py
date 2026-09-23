@@ -12,7 +12,7 @@ from typing import Any
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .charts import ChartDependencyError, default_export_path, export_chart
-from .histogram import render_histogram
+from .histogram import render_histogram, render_hourly_histogram
 from .history import DEFAULT_PLAN_INTERVAL_SECONDS, HistoryStore, capture_history
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
@@ -78,12 +78,23 @@ class UsageWorker(threading.Thread):
 
 def _export_history(events: queue.Queue[dict[str, Any]]) -> None:
     try:
-        history = HistoryStore().history(30)
+        store = HistoryStore()
+        store.record_local_session_usage()
+        history = store.history(30)
         output = export_chart(history, default_export_path())
     except (ChartDependencyError, OSError, sqlite3.Error) as exc:
         events.put({"kind": "export", "state": "error", "text": f"PNG export failed: {exc}"})
         return
     events.put({"kind": "export", "state": "done", "text": f"PNG saved to {output}"})
+
+
+def _load_history_lines(hourly: bool, width: int, hours: int = 12) -> list[str]:
+    store = HistoryStore()
+    store.record_local_session_usage()
+    history = store.history(2 if hourly else 14)
+    if hourly:
+        return render_hourly_histogram(history, width, hours=hours)
+    return render_histogram(history, width)
 
 
 def _planned_rows(store: HistoryStore, limits: dict[str, Any]) -> list[dict[str, Any]]:
@@ -219,6 +230,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     export_running = False
     last_updated: float | None = None
     show_history = False
+    history_hourly = False
     show_schedule = False
     selected_window = 0
     planned_rows: list[dict[str, Any]] = []
@@ -354,15 +366,16 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 curses.A_DIM,
             )
         elif show_history:
-            _safe_addstr(screen, 3, 2, "LOCAL USAGE HISTORY", curses.color_pair(2) | curses.A_BOLD)
-            for index, line in enumerate(history_lines[: max(0, height - 9)], start=5):
+            title = "LOCAL USAGE HISTORY"
+            _safe_addstr(screen, 3, 2, title, curses.color_pair(2) | curses.A_BOLD)
+            for index, line in enumerate(history_lines[: max(0, height - 10)], start=5):
                 _safe_addstr(screen, index, 3, line)
             _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
             _safe_addstr(
                 screen,
                 max(0, height - 3),
                 2,
-                "[H] Back   [S] Plan   [E] Export PNG   [R] Refresh   [Q] Quit",
+                "[T] Toggle view  [H] Back  [S] Plan  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
         else:
@@ -604,13 +617,29 @@ def _terminal_app(screen: Any, executable: str) -> None:
             show_schedule = False
             if show_history:
                 try:
-                    history_lines = render_histogram(HistoryStore().history(14), width - 6)
-                except sqlite3.Error as exc:
+                    history_hourly = False
+                    history_lines = _load_history_lines(False, width - 6)
+                except (OSError, sqlite3.Error) as exc:
                     history_lines = [f"Could not read local history: {exc}"]
+        elif show_history and key in (ord("t"), ord("T")):
+            history_hourly = not history_hourly
+            try:
+                history_lines = _load_history_lines(
+                    history_hourly, width - 6, hours=max(1, min(12, height - 12))
+                )
+            except (OSError, sqlite3.Error) as exc:
+                history_lines = [f"Could not read local history: {exc}"]
         elif key in (ord("r"), ord("R")):
             worker.actions.put("refresh")
             message = "Refreshing usage…"
             message_attr = curses.A_DIM
+            if show_history:
+                try:
+                    history_lines = _load_history_lines(
+                        history_hourly, width - 6, hours=max(1, min(12, height - 12))
+                    )
+                except (OSError, sqlite3.Error) as exc:
+                    history_lines = [f"Could not read local history: {exc}"]
         elif key in (ord("p"), ord("P")) and not ping_running:
             worker.actions.put("ping")
             ping_running = True

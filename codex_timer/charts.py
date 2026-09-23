@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import struct
+import time
 import zlib
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,7 @@ _FONT = {
     "7": (31, 1, 2, 4, 8, 8, 8),
     "8": (14, 17, 17, 14, 17, 17, 14),
     "9": (14, 17, 17, 15, 1, 1, 14),
+    "'": (4, 4, 8, 0, 0, 0, 0),
     ".": (0, 0, 0, 0, 0, 12, 12),
     ":": (0, 12, 12, 0, 12, 12, 0),
     "-": (0, 0, 0, 31, 0, 0, 0),
@@ -64,8 +67,8 @@ _FONT = {
 }
 
 
-def chart_series(history: dict[str, Any]) -> dict[str, Any]:
-    """Convert stored rows into date/token and timestamp/quota series."""
+def chart_series(history: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    """Convert stored rows into daily, hourly, and quota series."""
     daily = [
         (dt.date.fromisoformat(row["usage_date"]), int(row["tokens"]))
         for row in history.get("daily", [])
@@ -80,7 +83,21 @@ def chart_series(history: dict[str, Any]) -> dict[str, Any]:
     for values in quotas.values():
         values.sort(key=lambda item: item[0])
     daily.sort(key=lambda item: item[0])
-    return {"daily": daily, "quota": quotas, "days": history.get("days", 30)}
+    hourly_totals: dict[int, int] = defaultdict(int)
+    for row in history.get("local_tokens", []):
+        hour = int(float(row["captured_at"]) // 3600 * 3600)
+        hourly_totals[hour] += int(row["total_tokens"])
+    current_hour = int((time.time() if now is None else now) // 3600) * 3600
+    first_hour = current_hour - 71 * 3600
+    hourly = [
+        (hour, hourly_totals.get(hour, 0)) for hour in range(first_hour, current_hour + 3600, 3600)
+    ]
+    return {
+        "daily": daily,
+        "hourly": hourly,
+        "quota": quotas,
+        "days": history.get("days", 30),
+    }
 
 
 def default_export_path(now: dt.datetime | None = None) -> Path:
@@ -90,10 +107,12 @@ def default_export_path(now: dt.datetime | None = None) -> Path:
 
 
 class _Canvas:
+    PIXEL_SCALE = 2
+
     def __init__(self, width: int, height: int, background: tuple[int, int, int]) -> None:
-        self.width = width
-        self.height = height
-        self.pixels = bytearray(background * (width * height))
+        self.width = width * self.PIXEL_SCALE
+        self.height = height * self.PIXEL_SCALE
+        self.pixels = bytearray(background * (self.width * self.height))
 
     def pixel(self, x: int, y: int, color: tuple[int, int, int]) -> None:
         if 0 <= x < self.width and 0 <= y < self.height:
@@ -109,10 +128,14 @@ class _Canvas:
         color: tuple[int, int, int],
         thickness: int = 1,
     ) -> None:
+        x0 *= self.PIXEL_SCALE
+        y0 *= self.PIXEL_SCALE
+        x1 *= self.PIXEL_SCALE
+        y1 *= self.PIXEL_SCALE
         dx, dy = abs(x1 - x0), -abs(y1 - y0)
         sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
         error = dx + dy
-        radius = max(0, thickness // 2)
+        radius = max(0, thickness * self.PIXEL_SCALE // 2)
         while True:
             for ox in range(-radius, radius + 1):
                 for oy in range(-radius, radius + 1):
@@ -128,10 +151,23 @@ class _Canvas:
                 y0 += sy
 
     def circle(self, cx: int, cy: int, radius: int, color: tuple[int, int, int]) -> None:
+        cx *= self.PIXEL_SCALE
+        cy *= self.PIXEL_SCALE
+        radius *= self.PIXEL_SCALE
         for y in range(-radius, radius + 1):
             for x in range(-radius, radius + 1):
                 if x * x + y * y <= radius * radius:
                     self.pixel(cx + x, cy + y, color)
+
+    def rect(self, x: int, y: int, width: int, height: int, color: tuple[int, int, int]) -> None:
+        left = max(0, x * self.PIXEL_SCALE)
+        right = min(self.width, (x + width) * self.PIXEL_SCALE)
+        top = max(0, y * self.PIXEL_SCALE)
+        bottom = min(self.height, (y + height) * self.PIXEL_SCALE)
+        row = bytes(color) * max(0, right - left)
+        for py in range(top, bottom):
+            offset = (py * self.width + left) * 3
+            self.pixels[offset : offset + len(row)] = row
 
     def text(
         self,
@@ -141,20 +177,21 @@ class _Canvas:
         color: tuple[int, int, int],
         scale: int = 1,
     ) -> None:
-        cursor = x
+        unit = scale * self.PIXEL_SCALE
+        cursor = x * self.PIXEL_SCALE
         for char in value.upper():
             glyph = _FONT.get(char, _FONT[" "])
             for row, bits in enumerate(glyph):
                 for col in range(5):
                     if bits & (1 << (4 - col)):
-                        for sy in range(scale):
-                            for sx in range(scale):
+                        for sy in range(unit):
+                            for sx in range(unit):
                                 self.pixel(
-                                    cursor + col * scale + sx,
-                                    y + row * scale + sy,
+                                    cursor + col * unit + sx,
+                                    y * self.PIXEL_SCALE + row * unit + sy,
                                     color,
                                 )
-            cursor += 6 * scale
+            cursor += 6 * unit
 
     def png(self) -> bytes:
         raw = b"".join(
@@ -192,11 +229,11 @@ def _draw_axes(
     formatter: Any,
 ) -> tuple[int, int, int, int]:
     left, top, right, bottom = bounds
-    grid, axis, label = (229, 234, 240), (148, 163, 184), (100, 116, 139)
+    grid, axis, label = (224, 229, 235), (100, 116, 139), (51, 65, 85)
     for step in range(5):
         y = bottom - (bottom - top) * step // 4
         canvas.line(left, y, right, y, grid)
-        canvas.text(18, y - 3, formatter(max_y * step // 4), label)
+        canvas.text(18, y - 7, formatter(max_y * step // 4), label)
     canvas.line(left, top, left, bottom, axis)
     canvas.line(left, bottom, right, bottom, axis)
     return left, top, right, bottom
@@ -215,17 +252,26 @@ def _map_point(
     return x, y
 
 
-def _render_chart(series: dict[str, Any]) -> bytes:
-    canvas = _Canvas(1200, 760, (250, 251, 253))
-    ink, muted = (30, 41, 59), (100, 116, 139)
-    blue, teal, orange = (59, 130, 246), (15, 118, 110), (217, 119, 6)
-    canvas.text(34, 30, "CODEX USAGE HISTORY", ink, scale=2)
-    canvas.text(36, 55, f"LAST {series['days']} DAYS · LOCAL HISTORY", muted)
+def _format_token_axis(tokens: int) -> str:
+    for unit, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if tokens >= unit:
+            value = tokens / unit
+            text = f"{value:.1f}" if value % 1 else f"{value:.0f}"
+            return f"{text}{suffix}"
+    return str(tokens)
 
-    canvas.text(72, 100, "DAILY TOKEN ACTIVITY", ink, scale=1)
+
+def _render_chart(series: dict[str, Any]) -> bytes:
+    canvas = _Canvas(1200, 980, (255, 255, 255))
+    ink, muted = (15, 23, 42), (71, 85, 105)
+    blue, green, teal, orange = (37, 99, 235), (22, 163, 74), (13, 116, 110), (194, 95, 0)
+    canvas.text(34, 24, "CODEX USAGE HISTORY", ink, scale=3)
+    canvas.text(36, 58, f"LAST {series['days']} DAYS · LOCAL DATA", muted)
+
+    canvas.text(72, 105, "DAILY TOKEN ACTIVITY · ACCOUNT SUMMARY", ink, scale=2)
     daily = series["daily"]
     token_max = _nice_max(max((tokens for _, tokens in daily), default=1))
-    token_bounds = _draw_axes(canvas, (104, 132, 1150, 306), token_max, lambda n: str(n))
+    token_bounds = _draw_axes(canvas, (104, 142, 1150, 275), token_max, _format_token_axis)
     if daily:
         points = [
             _map_point(index, len(daily), tokens, token_max, token_bounds)
@@ -238,12 +284,28 @@ def _render_chart(series: dict[str, Any]) -> bytes:
         for index in sorted({0, len(daily) // 2, len(daily) - 1}):
             x, _ = _map_point(index, len(daily), 0, token_max, token_bounds)
             label = daily[index][0].strftime("%b %d").upper()
-            canvas.text(max(105, min(x - len(label) * 3, 1100)), 316, label, muted)
+            canvas.text(max(105, min(x - len(label) * 6, 1100)), 286, label, muted)
     else:
-        canvas.text(400, 208, "NO DAILY TOKEN ACTIVITY REPORTED YET", muted)
+        canvas.text(400, 200, "NO DAILY TOKEN ACTIVITY REPORTED YET", muted)
 
-    canvas.text(72, 382, "QUOTA CONSUMPTION", ink)
-    quota_bounds = _draw_axes(canvas, (104, 414, 1150, 620), 100, lambda n: f"{n}%")
+    canvas.text(72, 345, "LOCAL SESSION TOKENS · LAST 72 HOURS · HOURLY", ink, scale=2)
+    hourly = series.get("hourly", [])[-72:]
+    hourly_max = _nice_max(max((tokens for _, tokens in hourly), default=1))
+    hourly_bounds = _draw_axes(canvas, (104, 382, 1150, 520), hourly_max, _format_token_axis)
+    if any(tokens for _, tokens in hourly):
+        width = max(1, min(12, int((hourly_bounds[2] - hourly_bounds[0]) / len(hourly) * 0.7)))
+        for index, (hour, tokens) in enumerate(hourly):
+            x, y = _map_point(index, len(hourly), tokens, hourly_max, hourly_bounds)
+            canvas.rect(x - width // 2, y, width, hourly_bounds[3] - y, green)
+        for index in sorted({0, len(hourly) // 2, len(hourly) - 1}):
+            x, _ = _map_point(index, len(hourly), 0, hourly_max, hourly_bounds)
+            label = dt.datetime.fromtimestamp(hourly[index][0]).astimezone().strftime("%d %b %H:%M")
+            canvas.text(max(105, min(x - len(label) * 6, 1100)), 531, label.upper(), muted)
+    else:
+        canvas.text(355, 440, "NO LOCAL SESSION TOKEN EVENTS IN LAST 72 HOURS", muted)
+
+    canvas.text(72, 600, "QUOTA CONSUMPTION · SERVER SNAPSHOTS", ink, scale=2)
+    quota_bounds = _draw_axes(canvas, (104, 637, 1150, 800), 100, lambda n: f"{n}%")
     all_quota = [point for values in series["quota"].values() for point in values]
     if all_quota:
         start = min(timestamp for timestamp, _ in all_quota).timestamp()
@@ -259,27 +321,32 @@ def _render_chart(series: dict[str, Any]) -> bytes:
                 y = quota_bounds[3] - round(
                     (quota_bounds[3] - quota_bounds[1]) * min(max(percent, 0), 100) / 100
                 )
-                points.append((x, y))
+                if points and points[-1][0] == x:
+                    points[-1] = (x, y)
+                else:
+                    points.append((x, y))
             for first, second in zip(points, points[1:]):
                 canvas.line(*first, *second, color, thickness=3)
-            for point in points:
-                canvas.circle(*point, 4, color)
-        first_date = dt.datetime.fromtimestamp(start).astimezone().strftime("%Y-%m-%d")
-        last_date = dt.datetime.fromtimestamp(finish).astimezone().strftime("%Y-%m-%d")
-        canvas.text(104, 632, first_date, muted)
-        canvas.text(1050, 632, last_date, muted)
-        canvas.line(470, 658, 496, 658, teal, thickness=3)
-        canvas.text(504, 655, "5-HOUR", muted)
-        canvas.line(620, 658, 646, 658, orange, thickness=3)
-        canvas.text(654, 655, "WEEKLY", muted)
+        first_date = dt.datetime.fromtimestamp(start).astimezone().strftime("%d %b %H:%M")
+        last_date = dt.datetime.fromtimestamp(finish).astimezone().strftime("%d %b %H:%M")
+        canvas.text(104, 811, first_date.upper(), muted)
+        canvas.text(1000, 811, last_date.upper(), muted)
+        canvas.line(470, 855, 496, 855, teal, thickness=2)
+        canvas.text(504, 848, "5-HOUR", muted)
+        canvas.line(650, 855, 676, 855, orange, thickness=2)
+        canvas.text(684, 848, "WEEKLY", muted)
     else:
-        canvas.text(430, 510, "NO QUOTA SNAPSHOTS RECORDED YET", muted)
-    canvas.text(36, 720, "SOURCE: CODEX USAGE SNAPSHOTS SAVED LOCALLY", muted)
+        canvas.text(430, 705, "NO QUOTA SNAPSHOTS RECORDED YET", muted)
+    canvas.line(36, 904, 1164, 904, (203, 213, 225), thickness=1)
+    canvas.text(
+        36, 920, "ACCOUNT TOKEN TOTALS: CODEX · HOURLY TOKENS: THIS DEVICE'S SESSION LOGS", muted
+    )
+    canvas.text(36, 944, "QUOTA PERCENTAGES ARE SEPARATE FROM TOKEN COUNTS", muted)
     return canvas.png()
 
 
 def export_chart(history: dict[str, Any], output: Path) -> Path:
-    """Write a two-panel token and quota chart without optional packages."""
+    """Write daily, hourly, and quota curves without optional packages."""
     series = chart_series(history)
     output = output.expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
