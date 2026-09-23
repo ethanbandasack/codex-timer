@@ -5,11 +5,13 @@ from __future__ import annotations
 import curses
 import datetime as dt
 import queue
+import sqlite3
 import threading
 import time
 from typing import Any
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
+from .history import HistoryStore, capture_history
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
 
@@ -29,9 +31,10 @@ class UsageWorker(threading.Thread):
     def run(self) -> None:
         while not self.stopping.is_set():
             try:
+                history = HistoryStore()
                 with CodexServer(self.executable) as server:
                     self.emit("connection", text="Connected to Codex")
-                    self._refresh(server)
+                    self._refresh(server, history)
                     next_poll = time.monotonic() + 60
                     while not self.stopping.is_set():
                         try:
@@ -48,17 +51,18 @@ class UsageWorker(threading.Thread):
                             except (RuntimeError, TimeoutError, OSError) as exc:
                                 self.emit("ping", state="error", text=f"Ping failed: {exc}")
                         if action in ("refresh", "ping"):
-                            self._refresh(server)
+                            self._refresh(server, history)
                             next_poll = time.monotonic() + 60
-            except (RuntimeError, TimeoutError, OSError) as exc:
+            except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
                 self.emit("connection", text=f"Codex unavailable: {exc}")
                 if self.stopping.wait(10):
                     return
 
-    def _refresh(self, server: CodexServer) -> None:
+    def _refresh(self, server: CodexServer, history: HistoryStore) -> None:
         try:
-            self.emit("limits", limits=server.rate_limits(), updated=time.time())
-        except (RuntimeError, TimeoutError, OSError) as exc:
+            limits = capture_history(server, history)
+            self.emit("limits", limits=limits, updated=time.time())
+        except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
             self.emit("connection", text=f"Could not refresh: {exc}")
 
     def stop(self) -> None:

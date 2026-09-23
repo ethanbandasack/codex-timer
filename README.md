@@ -20,6 +20,8 @@ Keyboard controls:
 
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
 
+The app records quota usage snapshots and Codex's daily token-activity totals locally. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
+
 ## Terminal commands
 
 ```sh
@@ -29,7 +31,7 @@ bin/codex-timer ping --watch
 bin/codex-timer watch
 ```
 
-`status` reads the current server-reported reset times without sending a model request. `watch` continuously shows the countdown and notifies when Codex reports a reset.
+`status` reads the current server-reported reset times without sending a model request, and saves a history snapshot. `watch` continuously shows the countdown, saves snapshots, and notifies when Codex reports a reset.
 
 ## Use from any zsh directory
 

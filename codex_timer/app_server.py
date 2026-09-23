@@ -124,6 +124,9 @@ class CodexServer:
         buckets = result.get("rateLimitsByLimitId") or {}
         return buckets.get("codex") or result.get("rateLimits") or {}
 
+    def token_usage(self) -> dict[str, Any]:
+        return self.request("account/usage/read")
+
     def ping(
         self,
         model: str = DEFAULT_MODEL,
