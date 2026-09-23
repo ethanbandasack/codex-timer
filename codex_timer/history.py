@@ -105,6 +105,18 @@ class HistoryStore:
                     source_reset_at REAL,
                     interval_seconds INTEGER NOT NULL DEFAULT 18060
                 );
+
+                CREATE TABLE IF NOT EXISTS auto_ping_settings (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1))
+                );
+                INSERT OR IGNORE INTO auto_ping_settings (id, enabled) VALUES (1, 0);
+
+                CREATE TABLE IF NOT EXISTS auto_ping_attempts (
+                    slot_id INTEGER PRIMARY KEY,
+                    scheduled_at REAL NOT NULL,
+                    attempted_at REAL NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(plan_settings)")}
@@ -364,6 +376,29 @@ class HistoryStore:
             row = db.execute("SELECT interval_seconds FROM plan_settings WHERE id = 1").fetchone()
         return int(row["interval_seconds"]) if row else DEFAULT_PLAN_INTERVAL_SECONDS
 
+    def auto_ping_enabled(self) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT enabled FROM auto_ping_settings WHERE id = 1").fetchone()
+        return bool(row["enabled"])
+
+    def set_auto_ping_enabled(self, enabled: bool) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE auto_ping_settings SET enabled = ? WHERE id = 1", (int(enabled),))
+
+    def claim_planned_ping(
+        self, slot_id: int, scheduled_at: float, attempted_at: float | None = None
+    ) -> bool:
+        """Claim one scheduled band so retries or app restarts cannot ping it twice."""
+        if attempted_at is None:
+            attempted_at = time.time()
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO auto_ping_attempts "
+                "(slot_id, scheduled_at, attempted_at) VALUES (?, ?, ?)",
+                (slot_id, scheduled_at, attempted_at),
+            )
+        return cursor.rowcount == 1
+
     def ensure_plan_anchor(self, reset_at: float | None) -> float | None:
         """Persist the server reset as the plan anchor, preserving existing bands."""
         with self._connect() as db:
@@ -568,6 +603,7 @@ class HistoryStore:
 
     def clear_planned_slots(self) -> int:
         with self._connect() as db:
+            db.execute("DELETE FROM auto_ping_attempts")
             cursor = db.execute("DELETE FROM planned_slots")
         return cursor.rowcount
 
@@ -578,6 +614,7 @@ class HistoryStore:
             ).fetchone()
             if slot is None:
                 return False
+            db.execute("DELETE FROM auto_ping_attempts WHERE slot_id = ?", (slot_id,))
             db.execute("DELETE FROM planned_slots WHERE id = ?", (slot_id,))
             db.execute(
                 "UPDATE planned_slots SET position = -position - 1 WHERE position > ?",
