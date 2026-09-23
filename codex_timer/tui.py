@@ -13,7 +13,7 @@ from typing import Any
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .charts import ChartDependencyError, default_export_path, export_chart
 from .histogram import render_histogram
-from .history import HistoryStore, capture_history
+from .history import DEFAULT_PLAN_INTERVAL_SECONDS, HistoryStore, capture_history
 from .usage import local_time, notify_desktop, remaining_text, reset_map
 
 
@@ -99,6 +99,55 @@ def _planned_rows(store: HistoryStore, limits: dict[str, Any]) -> list[dict[str,
     ]
 
 
+def _read_prompt(screen: Any, prompt: str, maximum: int) -> str:
+    """Read one short line in curses while temporarily disabling the UI timeout."""
+    height, width = screen.getmaxyx()
+    y = max(0, height - 2)
+    screen.move(y, 0)
+    screen.clrtoeol()
+    _safe_addstr(screen, y, 2, prompt, curses.A_BOLD)
+    screen.refresh()
+    x = min(width - 2, len(prompt) + 3)
+    previous_timeout = 250
+    screen.timeout(-1)
+    try:
+        curses.echo()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        value = screen.getstr(y, x, max(1, min(maximum, width - x - 1)))
+    finally:
+        curses.noecho()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        screen.timeout(previous_timeout)
+    return value.decode("utf-8", errors="replace").strip()
+
+
+def _parse_local_datetime(value: str) -> float:
+    parsed = dt.datetime.fromisoformat(value)
+    if parsed.tzinfo is not None:
+        raise ValueError("Enter local time without a timezone")
+    return parsed.astimezone().timestamp()
+
+
+def _parse_interval(value: str) -> int:
+    hours_text, separator, minutes_text = value.strip().partition(":")
+    if not separator or not hours_text.isdigit() or not minutes_text.isdigit():
+        raise ValueError("Enter an interval as HH:MM")
+    hours, minutes = int(hours_text), int(minutes_text)
+    if minutes >= 60 or hours > 999 or (hours == 0 and minutes == 0):
+        raise ValueError("Interval must be between 00:01 and 999:59")
+    return hours * 3600 + minutes * 60
+
+
+def _format_interval(seconds: int) -> str:
+    return f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}"
+
+
 def _safe_addstr(screen: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     height, width = screen.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
@@ -174,6 +223,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     selected_window = 0
     planned_rows: list[dict[str, Any]] = []
     selected_slot_index = 0
+    planned_interval = DEFAULT_PLAN_INTERVAL_SECONDS
     history_lines: list[str] = []
     keep_running = True
 
@@ -203,7 +253,9 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 if show_schedule:
                     try:
                         previous_anchor = planned_rows[0]["scheduled_at"] if planned_rows else None
-                        planned_rows = _planned_rows(HistoryStore(), limits)
+                        schedule_store = HistoryStore()
+                        planned_rows = _planned_rows(schedule_store, limits)
+                        planned_interval = schedule_store.plan_interval()
                         if planned_rows and previous_anchor is None:
                             message = "Reset-based plan loaded"
                             message_attr = curses.color_pair(2) | curses.A_BOLD
@@ -239,25 +291,27 @@ def _terminal_app(screen: Any, executable: str) -> None:
         _safe_addstr(screen, 1, max(2, width - len(now_text) - 3), now_text, curses.A_DIM)
         _safe_addstr(screen, 2, 2, "=" * max(1, width - 4), curses.A_DIM)
         if show_schedule:
+            interval_label = _format_interval(planned_interval)
             _safe_addstr(
                 screen,
                 3,
                 2,
-                "RESET + BANDS · LOCAL PLAN BASED ON THE CODEX 5-HOUR RESET",
+                f"RESET + BANDS · LOCAL PLAN · BAND INTERVAL {interval_label}",
                 curses.color_pair(2) | curses.A_BOLD,
             )
             if planned_rows:
-                visible_rows = max(1, height - 10)
+                visible_rows = max(1, height - 12)
                 first_row = min(
                     max(0, selected_slot_index - visible_rows + 1),
                     max(0, len(planned_rows) - visible_rows),
                 )
                 for index in range(first_row, min(len(planned_rows), first_row + visible_rows)):
                     slot = planned_rows[index]
-                    scheduled_text = dt.datetime.fromtimestamp(
-                        slot["scheduled_at"], tz=dt.timezone.utc
+                    scheduled_text = (
+                        dt.datetime.fromtimestamp(slot["scheduled_at"])
+                        .astimezone()
+                        .strftime("%a %d %b  %H:%M %Z")
                     )
-                    scheduled_text = scheduled_text.astimezone().strftime("%a %d %b  %H:%M %Z")
                     marker = ">" if index == selected_slot_index else " "
                     label = "RESET" if index == 0 else f"+BAND {index:02}"
                     row = (
@@ -266,6 +320,10 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     )
                     attr = curses.A_REVERSE | curses.A_BOLD if index == selected_slot_index else 0
                     _safe_addstr(screen, 5 + index - first_row, 3, row, attr)
+                if len(planned_rows) == 1:
+                    _safe_addstr(
+                        screen, 7, 3, "No ping bands planned · 0 planned pings", curses.A_DIM
+                    )
             else:
                 _safe_addstr(
                     screen,
@@ -273,19 +331,26 @@ def _terminal_app(screen: Any, executable: str) -> None:
                     3,
                     "Codex reset time unavailable. Press R to refresh before adding a band.",
                 )
-            _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
+            _safe_addstr(screen, max(0, height - 6), 2, message, message_attr)
+            _safe_addstr(
+                screen,
+                max(0, height - 4),
+                2,
+                "[↑↓] Select  [←→] Move selected and later rows ±5m",
+                curses.A_BOLD,
+            )
             _safe_addstr(
                 screen,
                 max(0, height - 3),
                 2,
-                "[↑↓] Select  [←→] Reset ±1h / band ±5m  [+] Add band  [X] Delete band  [S] Back",
+                "[E] Exact date/time  [I] Set interval  [+] Add  [X] Delete  [0] Clear all bands",
                 curses.A_BOLD,
             )
             _safe_addstr(
                 screen,
                 max(0, height - 2),
                 2,
-                "Each band is 5h01 after the previous row; changing reset shifts every band.",
+                "[S] Back · reset cannot move before Codex's next reset",
                 curses.A_DIM,
             )
         elif show_history:
@@ -389,21 +454,85 @@ def _terminal_app(screen: Any, executable: str) -> None:
             else:
                 try:
                     store = HistoryStore()
+                    direction = "later" if key == curses.KEY_RIGHT else "earlier"
                     if selected_slot_index == 0:
-                        shift = 3600 if key == curses.KEY_RIGHT else -3600
-                        store.shift_plan_anchor(shift)
+                        previous = planned_rows[0]["scheduled_at"]
+                        anchor = store.shift_plan_anchor(300 if key == curses.KEY_RIGHT else -300)
                         planned_rows = _planned_rows(store, limits)
-                        direction = "later" if shift > 0 else "earlier"
-                        message = f"Planned reset and all bands moved one hour {direction}"
+                        if anchor == previous and direction == "earlier":
+                            message = (
+                                "Reset is already at Codex's next reset; it cannot move earlier"
+                            )
+                        else:
+                            message = f"Reset and all bands moved 5 minutes {direction}"
                     else:
-                        shift = 300 if key == curses.KEY_RIGHT else -300
-                        store.shift_planned_slots(planned_rows[selected_slot_index]["id"], shift)
+                        selected = planned_rows[selected_slot_index]
+                        previous = selected["scheduled_at"]
+                        store.shift_planned_slots(
+                            selected["id"], 300 if key == curses.KEY_RIGHT else -300
+                        )
                         planned_rows = _planned_rows(store, limits)
-                        direction = "later" if shift > 0 else "earlier"
-                        message = f"Selected band and later bands moved 5 minutes {direction}"
+                        moved = planned_rows[selected_slot_index]["scheduled_at"] != previous
+                        message = (
+                            f"Selected band and later bands moved 5 minutes {direction}"
+                            if moved
+                            else "Band cannot move before the previous planned row"
+                        )
                     message_attr = curses.color_pair(2) | curses.A_BOLD
                 except sqlite3.Error as exc:
                     message = f"Could not move planned time: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("e"), ord("E")) and planned_rows:
+            selected = planned_rows[selected_slot_index]
+            current_text = (
+                dt.datetime.fromtimestamp(selected["scheduled_at"])
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M")
+            )
+            value = _read_prompt(
+                screen,
+                f"Time YYYY-MM-DD HH:MM (current {current_text}): ",
+                16,
+            )
+            if value:
+                try:
+                    requested = _parse_local_datetime(value)
+                    store = HistoryStore()
+                    actual = (
+                        store.set_plan_anchor(requested)
+                        if selected_slot_index == 0
+                        else store.set_planned_slot_time(selected["id"], requested)
+                    )
+                    planned_rows = _planned_rows(store, limits)
+                    if actual is not None and actual != requested:
+                        message = "Time adjusted to keep the schedule after its previous reset/row"
+                        message_attr = curses.color_pair(4) | curses.A_BOLD
+                    else:
+                        message = "Selected time updated; later bands shifted by the same amount"
+                        message_attr = curses.color_pair(2) | curses.A_BOLD
+                except (ValueError, sqlite3.Error) as exc:
+                    message = f"Invalid planned time: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("i"), ord("I")):
+            if not planned_rows:
+                message = "Reset time unavailable. Press R before editing the band interval."
+                message_attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                interval = _format_interval(planned_interval)
+                value = _read_prompt(screen, f"Band interval HH:MM (now {interval}): ", 7)
+            if planned_rows and value:
+                try:
+                    seconds = _parse_interval(value)
+                    store = HistoryStore()
+                    store.set_plan_interval(seconds)
+                    planned_interval = seconds
+                    planned_rows = _planned_rows(store, limits)
+                    message = (
+                        f"Band interval set to {_format_interval(seconds)}; existing bands respaced"
+                    )
+                    message_attr = curses.color_pair(2) | curses.A_BOLD
+                except (ValueError, sqlite3.Error) as exc:
+                    message = f"Invalid band interval: {exc}"
                     message_attr = curses.color_pair(3) | curses.A_BOLD
         elif show_schedule and key in (ord("+"), ord("a"), ord("A")):
             if not planned_rows:
@@ -413,9 +542,10 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 try:
                     store = HistoryStore()
                     store.add_planned_slot(anchor_at=planned_rows[0]["scheduled_at"])
+                    planned_interval = store.plan_interval()
                     planned_rows = _planned_rows(store, limits)
                     selected_slot_index = len(planned_rows) - 1
-                    message = "Added band 5h01 after the previous row"
+                    message = f"Added band {_format_interval(store.plan_interval())} after the previous row"
                     message_attr = curses.color_pair(2) | curses.A_BOLD
                 except sqlite3.Error as exc:
                     message = f"Could not add band: {exc}"
@@ -431,12 +561,26 @@ def _terminal_app(screen: Any, executable: str) -> None:
             except sqlite3.Error as exc:
                 message = f"Could not delete band: {exc}"
                 message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key == ord("0"):
+            try:
+                removed = HistoryStore().clear_planned_slots()
+                planned_rows = _planned_rows(HistoryStore(), limits)
+                selected_slot_index = 0
+                message = (
+                    f"Cleared {removed} ping band{'s' if removed != 1 else ''}; 0 pings planned"
+                )
+                message_attr = curses.color_pair(2) | curses.A_BOLD
+            except sqlite3.Error as exc:
+                message = f"Could not clear planned bands: {exc}"
+                message_attr = curses.color_pair(3) | curses.A_BOLD
         elif key in (ord("s"), ord("S")):
             show_schedule = not show_schedule
             show_history = False
             if show_schedule:
                 try:
-                    planned_rows = _planned_rows(HistoryStore(), limits)
+                    schedule_store = HistoryStore()
+                    planned_rows = _planned_rows(schedule_store, limits)
+                    planned_interval = schedule_store.plan_interval()
                     selected_slot_index = min(selected_slot_index, max(0, len(planned_rows) - 1))
                     message = (
                         "Reset-based plan opened"

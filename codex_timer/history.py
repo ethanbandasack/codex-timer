@@ -83,10 +83,17 @@ class HistoryStore:
                 CREATE TABLE IF NOT EXISTS plan_settings (
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     reset_anchor_at REAL NOT NULL,
-                    source_reset_at REAL
+                    source_reset_at REAL,
+                    interval_seconds INTEGER NOT NULL DEFAULT 18060
                 );
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(plan_settings)")}
+            if "interval_seconds" not in columns:
+                db.execute(
+                    "ALTER TABLE plan_settings ADD COLUMN interval_seconds INTEGER NOT NULL "
+                    f"DEFAULT {DEFAULT_PLAN_INTERVAL_SECONDS}"
+                )
 
     def record_quota_snapshot(
         self, limits: dict[str, Any], captured_at: float | None = None
@@ -209,6 +216,11 @@ class HistoryStore:
             row = db.execute("SELECT reset_anchor_at FROM plan_settings WHERE id = 1").fetchone()
         return row["reset_anchor_at"] if row else None
 
+    def plan_interval(self) -> int:
+        with self._connect() as db:
+            row = db.execute("SELECT interval_seconds FROM plan_settings WHERE id = 1").fetchone()
+        return int(row["interval_seconds"]) if row else DEFAULT_PLAN_INTERVAL_SECONDS
+
     def ensure_plan_anchor(self, reset_at: float | None) -> float | None:
         """Persist the server reset as the plan anchor, preserving existing bands."""
         with self._connect() as db:
@@ -218,19 +230,20 @@ class HistoryStore:
             if row:
                 anchor_at = row["reset_anchor_at"]
                 source_reset_at = row["source_reset_at"]
-                if reset_at is not None and source_reset_at is None:
-                    db.execute(
-                        "UPDATE plan_settings SET source_reset_at = ? WHERE id = 1", (reset_at,)
-                    )
-                elif reset_at is not None and reset_at != source_reset_at:
-                    shift = reset_at - source_reset_at
-                    anchor_at += shift
+                if reset_at is not None:
+                    if source_reset_at is not None:
+                        anchor_at += reset_at - source_reset_at
+                    anchor_at = max(anchor_at, reset_at)
+                    shift = anchor_at - row["reset_anchor_at"]
                     db.execute(
                         "UPDATE plan_settings SET reset_anchor_at = ?, source_reset_at = ? "
                         "WHERE id = 1",
                         (anchor_at, reset_at),
                     )
-                    db.execute("UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (shift,))
+                    if shift:
+                        db.execute(
+                            "UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (shift,)
+                        )
                 return anchor_at
 
             bands = db.execute(
@@ -249,32 +262,66 @@ class HistoryStore:
                 return None
 
             db.execute(
-                "INSERT INTO plan_settings (id, reset_anchor_at, source_reset_at) VALUES (1, ?, ?)",
-                (anchor_at, reset_at),
+                "INSERT INTO plan_settings (id, reset_anchor_at, source_reset_at, interval_seconds) "
+                "VALUES (1, ?, ?, ?)",
+                (anchor_at, reset_at, DEFAULT_PLAN_INTERVAL_SECONDS),
             )
         return anchor_at
 
-    def shift_plan_anchor(self, offset_seconds: int) -> float | None:
+    def shift_plan_anchor(self, offset_seconds: float) -> float | None:
         with self._connect() as db:
-            row = db.execute("SELECT reset_anchor_at FROM plan_settings WHERE id = 1").fetchone()
+            row = db.execute(
+                "SELECT reset_anchor_at, source_reset_at FROM plan_settings WHERE id = 1"
+            ).fetchone()
             if row is None:
                 return None
-            anchor_at = row["reset_anchor_at"] + offset_seconds
+            old_anchor = row["reset_anchor_at"]
+            anchor_at = old_anchor + offset_seconds
+            floor = row["source_reset_at"] if row["source_reset_at"] is not None else old_anchor
+            anchor_at = max(anchor_at, floor)
+            shift = anchor_at - old_anchor
             db.execute("UPDATE plan_settings SET reset_anchor_at = ? WHERE id = 1", (anchor_at,))
-            db.execute(
-                "UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (offset_seconds,)
+            if shift:
+                db.execute("UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (shift,))
+        return anchor_at
+
+    def set_plan_anchor(self, scheduled_at: float) -> float | None:
+        """Set the local reset anchor without allowing it before Codex's next reset."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT reset_anchor_at, source_reset_at FROM plan_settings WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                return None
+            floor = (
+                row["source_reset_at"]
+                if row["source_reset_at"] is not None
+                else row["reset_anchor_at"]
             )
+            anchor_at = max(scheduled_at, floor)
+            shift = anchor_at - row["reset_anchor_at"]
+            db.execute("UPDATE plan_settings SET reset_anchor_at = ? WHERE id = 1", (anchor_at,))
+            if shift:
+                db.execute("UPDATE planned_slots SET scheduled_at = scheduled_at + ?", (shift,))
         return anchor_at
 
     def add_planned_slot(
         self,
         now: float | None = None,
-        interval_seconds: int = DEFAULT_PLAN_INTERVAL_SECONDS,
+        interval_seconds: int | None = None,
         anchor_at: float | None = None,
     ) -> dict[str, Any]:
         if now is None:
             now = time.time()
         with self._connect() as db:
+            if interval_seconds is None:
+                setting = db.execute(
+                    "SELECT interval_seconds FROM plan_settings WHERE id = 1"
+                ).fetchone()
+                interval_seconds = (
+                    int(setting["interval_seconds"]) if setting else DEFAULT_PLAN_INTERVAL_SECONDS
+                )
+            interval_seconds = max(60, int(interval_seconds))
             previous = db.execute(
                 "SELECT position, scheduled_at FROM planned_slots ORDER BY position DESC LIMIT 1"
             ).fetchone()
@@ -299,14 +346,86 @@ class HistoryStore:
     def shift_planned_slots(self, slot_id: int, offset_seconds: int) -> int:
         with self._connect() as db:
             slot = db.execute(
-                "SELECT position FROM planned_slots WHERE id = ?", (slot_id,)
+                "SELECT position, scheduled_at FROM planned_slots WHERE id = ?", (slot_id,)
             ).fetchone()
             if slot is None:
                 return 0
+            previous = db.execute(
+                "SELECT scheduled_at FROM planned_slots WHERE position < ? "
+                "ORDER BY position DESC LIMIT 1",
+                (slot["position"],),
+            ).fetchone()
+            if previous is None:
+                anchor = db.execute(
+                    "SELECT reset_anchor_at FROM plan_settings WHERE id = 1"
+                ).fetchone()
+                previous_at = anchor["reset_anchor_at"] if anchor else None
+            else:
+                previous_at = previous["scheduled_at"]
+            new_time = slot["scheduled_at"] + offset_seconds
+            if previous_at is not None:
+                new_time = max(new_time, previous_at + 60)
+            actual_shift = new_time - slot["scheduled_at"]
             cursor = db.execute(
                 "UPDATE planned_slots SET scheduled_at = scheduled_at + ? WHERE position >= ?",
-                (offset_seconds, slot["position"]),
+                (actual_shift, slot["position"]),
             )
+        return cursor.rowcount
+
+    def set_planned_slot_time(self, slot_id: int, scheduled_at: float) -> float | None:
+        with self._connect() as db:
+            slot = db.execute(
+                "SELECT position, scheduled_at FROM planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if slot is None:
+                return None
+            previous = db.execute(
+                "SELECT scheduled_at FROM planned_slots WHERE position < ? "
+                "ORDER BY position DESC LIMIT 1",
+                (slot["position"],),
+            ).fetchone()
+            if previous is None:
+                anchor = db.execute(
+                    "SELECT reset_anchor_at FROM plan_settings WHERE id = 1"
+                ).fetchone()
+                previous_at = anchor["reset_anchor_at"] if anchor else None
+            else:
+                previous_at = previous["scheduled_at"]
+            target = (
+                max(scheduled_at, previous_at + 60) if previous_at is not None else scheduled_at
+            )
+            shift = target - slot["scheduled_at"]
+            db.execute(
+                "UPDATE planned_slots SET scheduled_at = scheduled_at + ? WHERE position >= ?",
+                (shift, slot["position"]),
+            )
+        return target
+
+    def set_plan_interval(self, interval_seconds: int) -> int:
+        """Save a custom band interval and place each band at that interval from reset."""
+        interval_seconds = int(interval_seconds)
+        if interval_seconds < 60:
+            raise ValueError("Band interval must be at least one minute")
+        with self._connect() as db:
+            anchor = db.execute("SELECT reset_anchor_at FROM plan_settings WHERE id = 1").fetchone()
+            if anchor is None:
+                raise ValueError("Cannot set a band interval before the reset anchor is available")
+            db.execute(
+                "UPDATE plan_settings SET interval_seconds = ? WHERE id = 1", (interval_seconds,)
+            )
+            slots = db.execute(
+                "SELECT id, position FROM planned_slots ORDER BY position"
+            ).fetchall()
+            for index, slot in enumerate(slots, start=1):
+                db.execute(
+                    "UPDATE planned_slots SET scheduled_at = ? WHERE id = ?",
+                    (anchor["reset_anchor_at"] + interval_seconds * index, slot["id"]),
+                )
+        return interval_seconds
+
+    def clear_planned_slots(self) -> int:
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM planned_slots")
         return cursor.rowcount
 
     def delete_planned_slot(self, slot_id: int) -> bool:
