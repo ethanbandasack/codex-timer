@@ -9,6 +9,7 @@ import sys
 
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .history import HistoryStore, capture_history
+from .histogram import render_histogram
 from .tui import run_terminal_app
 from .usage import print_status, watch
 
@@ -29,6 +30,9 @@ def make_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("status", help="Read current reset times without sending a model request.")
 
+    history = commands.add_parser("history", help="Show the local terminal usage histogram.")
+    history.add_argument("--days", type=int, default=14, help="History period (1 to 365 days).")
+
     monitor = commands.add_parser("watch", help="Monitor reset times without pinging.")
     monitor.add_argument("--poll-seconds", type=int, default=60)
     monitor.add_argument("--no-notify", action="store_true")
@@ -40,6 +44,13 @@ def main() -> int:
     if args.command in ("watch", "ping") and args.poll_seconds < 10:
         print("--poll-seconds must be at least 10", file=sys.stderr)
         return 2
+
+    if args.command == "history":
+        store = HistoryStore()
+        report = store.history(args.days)
+        print("\n".join(render_histogram(report, shutil.get_terminal_size((80, 24)).columns)))
+        print(f"\nHistory database: {store.path}")
+        return 0
 
     executable = args.codex_bin or shutil.which("codex")
     if not executable:
