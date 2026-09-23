@@ -22,7 +22,7 @@ Keyboard controls:
 
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
 
-The app records quota usage snapshots and Codex's daily token-activity totals locally. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
+The app records quota snapshots, Codex's daily token-activity totals, and per-response token counts from local session logs. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. The local session importer stores token metadata only; it does not save prompts or responses. Those hourly counts cover Codex sessions on this device, while the account endpoint reports daily totals. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
 The reset anchor, band interval, and bands are stored locally in that database. Editing the anchor changes only the local plan; it cannot move before Codex's next reported reset. Bands must remain at least one minute after the previous row and do not send pings automatically.
 
 ## Terminal commands
@@ -33,13 +33,13 @@ bin/codex-timer ping
 bin/codex-timer ping --watch
 bin/codex-timer watch
 bin/codex-timer history --days 14
+bin/codex-timer history --hourly
 bin/codex-timer export --days 30 --output ~/Desktop/codex-usage.png
-bin/codex-timer history --days 14
 ```
 
 `status` reads the current server-reported reset times without sending a model request, and saves a history snapshot. `watch` continuously shows the countdown, saves snapshots, and notifies when Codex reports a reset.
-`history` renders daily token activity as a terminal histogram, or falls back to recent 5-hour quota snapshots until token activity is available.
-`export` writes daily token activity and 5-hour/weekly quota curves to a PNG using a built-in renderer; it needs no optional packages. The TUI's `E` key exports the same chart to the app's exports folder.
+`history` renders daily account token activity or falls back to recent 5-hour quota snapshots until token activity is available. `history --hourly` shows recent per-hour token totals reconstructed from this device's local session logs; press `T` in the TUI history screen to switch between daily and hourly views.
+`export` writes daily account token activity, local hourly token counts, and 5-hour/weekly quota curves to a 2400 × 1960 PNG using a built-in renderer; it needs no optional packages. Hourly token totals are separate from quota percentages. The TUI's `E` key exports the same chart to the app's exports folder.
 
 ## Use from any zsh directory
 

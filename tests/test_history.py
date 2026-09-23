@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -29,6 +30,84 @@ class FakeUsageSource:
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_local_session_import_stores_only_token_metadata_and_is_incremental(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            log = root / "rollout-session-123.jsonl"
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+            rows = [
+                {"type": "response_item", "payload": {"text": "private prompt content"}},
+                {
+                    "type": "event_msg",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 90,
+                                "cached_input_tokens": 20,
+                                "output_tokens": 30,
+                                "reasoning_output_tokens": 10,
+                                "total_tokens": 120,
+                            }
+                        },
+                    },
+                },
+            ]
+            log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            store = HistoryStore(Path(temp_dir) / "history.sqlite3")
+
+            first_import = store.record_local_session_usage(root)
+            second_import = store.record_local_session_usage(root)
+            local_tokens = store.history(days=1)["local_tokens"]
+            with sqlite3.connect(store.path) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(local_session_usage)")}
+                saved_values = " ".join(
+                    str(value)
+                    for row in db.execute("SELECT * FROM local_session_usage")
+                    for value in row
+                )
+
+        self.assertEqual(first_import, 1)
+        self.assertEqual(second_import, 0)
+        self.assertEqual(len(local_tokens), 1)
+        self.assertEqual(local_tokens[0]["input_tokens"], 90)
+        self.assertEqual(local_tokens[0]["cached_input_tokens"], 20)
+        self.assertEqual(local_tokens[0]["output_tokens"], 30)
+        self.assertEqual(local_tokens[0]["reasoning_output_tokens"], 10)
+        self.assertEqual(local_tokens[0]["total_tokens"], 120)
+        self.assertFalse({"prompt", "text", "message", "content"} & columns)
+        self.assertNotIn("private prompt content", saved_values)
+
+    def test_local_session_import_retries_a_partial_final_line(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            log = root / "rollout-session-456.jsonl"
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+            event = {
+                "type": "event_msg",
+                "timestamp": timestamp,
+                "payload": {
+                    "type": "token_count",
+                    "info": {"last_token_usage": {"total_tokens": 9}},
+                },
+            }
+            encoded = json.dumps(event).encode("utf-8")
+            log.write_bytes(encoded)
+            store = HistoryStore(Path(temp_dir) / "history.sqlite3")
+
+            before_newline = store.record_local_session_usage(root)
+            with log.open("ab") as stream:
+                stream.write(b"\n")
+            after_newline = store.record_local_session_usage(root)
+            imported = store.history(days=1)["local_tokens"]
+
+        self.assertEqual(before_newline, 0)
+        self.assertEqual(after_newline, 1)
+        self.assertEqual(imported[0]["total_tokens"], 9)
+
     def test_capture_persists_quota_and_daily_token_activity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = HistoryStore(Path(temp_dir) / "history.sqlite3")

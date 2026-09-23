@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import sqlite3
 import sys
@@ -62,6 +63,24 @@ class HistoryStore:
                     usage_date TEXT PRIMARY KEY,
                     tokens INTEGER NOT NULL CHECK(tokens >= 0),
                     observed_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS local_session_usage (
+                    event_key TEXT PRIMARY KEY,
+                    captured_at REAL NOT NULL,
+                    session_id TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL CHECK(total_tokens >= 0)
+                );
+                CREATE INDEX IF NOT EXISTS local_session_usage_time
+                    ON local_session_usage(captured_at);
+
+                CREATE TABLE IF NOT EXISTS session_log_offsets (
+                    file_key TEXT PRIMARY KEY,
+                    byte_offset INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS token_usage_summary (
@@ -176,6 +195,123 @@ class HistoryStore:
             self._prune(db, observed_at)
         return len(accepted)
 
+    def record_local_session_usage(self, root: Path | None = None, now: float | None = None) -> int:
+        """Import token-count metadata from rollout logs, discarding conversation content."""
+        root = root or Path.home() / ".codex" / "sessions"
+        now = now if now is not None else time.time()
+        if not root.is_dir():
+            return 0
+
+        cutoff = now - self.retention_days * 86400
+        imported = 0
+        files = sorted(root.rglob("rollout-*.jsonl"))
+        with self._connect() as db:
+            for path in files:
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        continue
+                    file_key = path.relative_to(root).as_posix()
+                    state = db.execute(
+                        "SELECT byte_offset FROM session_log_offsets WHERE file_key = ?",
+                        (file_key,),
+                    ).fetchone()
+                    offset = int(state["byte_offset"]) if state else 0
+                    if offset > path.stat().st_size:
+                        offset = 0
+
+                    with path.open("rb") as stream:
+                        stream.seek(offset)
+                        while True:
+                            line_offset = stream.tell()
+                            line = stream.readline()
+                            if not line:
+                                offset = stream.tell()
+                                break
+                            if not line.endswith(b"\n"):
+                                offset = line_offset
+                                break
+                            offset = stream.tell()
+                            try:
+                                row = json.loads(line)
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                            if not isinstance(row, dict):
+                                continue
+                            payload = row.get("payload") or {}
+                            if not isinstance(payload, dict):
+                                continue
+                            if (
+                                row.get("type") != "event_msg"
+                                or payload.get("type") != "token_count"
+                            ):
+                                continue
+                            info = payload.get("info") or {}
+                            if not isinstance(info, dict):
+                                continue
+                            usage = info.get("last_token_usage") or {}
+                            if not isinstance(usage, dict):
+                                continue
+                            total = usage.get("total_tokens")
+                            timestamp = row.get("timestamp")
+                            if (
+                                not isinstance(total, int)
+                                or isinstance(total, bool)
+                                or total < 0
+                                or not isinstance(timestamp, str)
+                            ):
+                                continue
+                            try:
+                                captured_at = dt.datetime.fromisoformat(
+                                    timestamp.replace("Z", "+00:00")
+                                ).timestamp()
+                            except (AttributeError, TypeError, ValueError):
+                                continue
+                            if captured_at < cutoff:
+                                continue
+                            usage_values = {}
+                            for key in (
+                                "input_tokens",
+                                "cached_input_tokens",
+                                "output_tokens",
+                                "reasoning_output_tokens",
+                            ):
+                                value = usage.get(key)
+                                usage_values[key] = (
+                                    value
+                                    if isinstance(value, int)
+                                    and not isinstance(value, bool)
+                                    and value >= 0
+                                    else 0
+                                )
+                            cursor = db.execute(
+                                """INSERT OR IGNORE INTO local_session_usage
+                                   (event_key, captured_at, session_id, input_tokens,
+                                    cached_input_tokens, output_tokens, reasoning_output_tokens,
+                                    total_tokens)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    f"{file_key}:{line_offset}",
+                                    captured_at,
+                                    path.stem.removeprefix("rollout-"),
+                                    usage_values.get("input_tokens", 0),
+                                    usage_values.get("cached_input_tokens", 0),
+                                    usage_values.get("output_tokens", 0),
+                                    usage_values.get("reasoning_output_tokens", 0),
+                                    total,
+                                ),
+                            )
+                            imported += cursor.rowcount
+
+                    db.execute(
+                        """INSERT INTO session_log_offsets (file_key, byte_offset) VALUES (?, ?)
+                           ON CONFLICT(file_key) DO UPDATE SET byte_offset = excluded.byte_offset""",
+                        (file_key, offset),
+                    )
+                except OSError:
+                    continue
+            self._prune(db, now)
+        return imported
+
     def history(self, days: int = 30) -> dict[str, Any]:
         days = min(365, max(1, days))
         today = dt.datetime.now().astimezone().date()
@@ -192,6 +328,12 @@ class HistoryStore:
                    FROM quota_samples WHERE captured_at >= ? ORDER BY captured_at""",
                 (start_time,),
             ).fetchall()
+            local_tokens = db.execute(
+                """SELECT captured_at, session_id, input_tokens, cached_input_tokens,
+                          output_tokens, reasoning_output_tokens, total_tokens
+                   FROM local_session_usage WHERE captured_at >= ? ORDER BY captured_at""",
+                (start_time,),
+            ).fetchall()
             summary = db.execute(
                 """SELECT observed_at, lifetime_tokens, peak_daily_tokens, current_streak_days,
                           longest_streak_days, longest_running_turn_sec
@@ -199,6 +341,7 @@ class HistoryStore:
             ).fetchone()
         return {
             "daily": [dict(row) for row in daily],
+            "local_tokens": [dict(row) for row in local_tokens],
             "quota": [dict(row) for row in quota],
             "summary": dict(summary) if summary else None,
             "days": days,
@@ -449,6 +592,7 @@ class HistoryStore:
         cutoff_date = (today - dt.timedelta(days=self.retention_days)).isoformat()
         db.execute("DELETE FROM quota_samples WHERE captured_at < ?", (cutoff,))
         db.execute("DELETE FROM daily_token_usage WHERE usage_date < ?", (cutoff_date,))
+        db.execute("DELETE FROM local_session_usage WHERE captured_at < ?", (cutoff,))
 
 
 def capture_history(server: Any, store: HistoryStore) -> dict[str, Any]:
@@ -456,6 +600,10 @@ def capture_history(server: Any, store: HistoryStore) -> dict[str, Any]:
     limits = server.rate_limits()
     observed_at = time.time()
     store.record_quota_snapshot(limits, observed_at)
+    try:
+        store.record_local_session_usage(now=observed_at)
+    except (OSError, sqlite3.Error):
+        pass
     try:
         token_usage = server.token_usage()
     except (RuntimeError, TimeoutError, OSError):

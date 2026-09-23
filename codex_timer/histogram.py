@@ -65,3 +65,42 @@ def render_histogram(history: dict[str, Any], width: int = 80) -> list[str]:
         )
     )
     return lines
+
+
+def render_hourly_histogram(
+    history: dict[str, Any], width: int = 80, hours: int = 24, now: float | None = None
+) -> list[str]:
+    """Render per-hour token counts reconstructed from this device's session logs."""
+    width = max(48, width)
+    hours = min(168, max(1, hours))
+    now = now if now is not None else dt.datetime.now().astimezone().timestamp()
+    current_hour = int(now // 3600) * 3600
+    first_hour = current_hour - (hours - 1) * 3600
+    counts = {first_hour + index * 3600: 0 for index in range(hours)}
+    for row in history.get("local_tokens", []):
+        hour = int(float(row["captured_at"]) // 3600 * 3600)
+        if hour in counts:
+            counts[hour] += int(row.get("total_tokens") or 0)
+
+    maximum = max(counts.values(), default=0)
+    if maximum <= 0:
+        return [
+            f"Local session token activity · last {hours} hours",
+            "No local token-count events found in this period.",
+            "Start a Codex session to create local token-count events.",
+        ]
+
+    bar_width = min(36, width - 31)
+    lines = [
+        f"Local session token activity · last {hours} hours",
+        "Hour             Tokens    Usage",
+    ]
+    for timestamp, tokens in counts.items():
+        local = dt.datetime.fromtimestamp(timestamp).astimezone()
+        label = local.strftime("%a %d %H:%M %Z")
+        lines.append(
+            f"{label:<16}  {_compact_number(tokens):>7}    {_bar(tokens, maximum, bar_width)}"
+        )
+    lines.append("Per-event token counts come from this device's local Codex session logs.")
+    lines.append("They are separate from the server's quota percentage.")
+    return lines
