@@ -14,7 +14,7 @@ Or double-click `Start Codex Timer.command`. The full-screen UI refreshes usage 
 
 Keyboard controls:
 
-- `P` sends a one-word hello using `gpt-5.6-luna` at low effort, then closes the in-memory chat.
+- `P` sends a one-word hello using `gpt-5.6-luna` at low effort when available. If the installed Codex CLI does not support it, the app uses the CLI's advertised default model at low effort, then closes the in-memory chat.
 - `R` refreshes usage immediately.
 - `S` opens the programming menu, anchored to Codex's reported 5-hour reset. `+` adds a band after the previous row (default `05:01`, giving `08:01` then `13:02` for a `03:00` reset); `↑`/`↓` select rows; `←`/`→` shift the selected row and later rows by five minutes; `E` edits the selected local date and time; `I` changes the band interval and respaces existing bands; `X` deletes one band; `0` clears all bands so zero pings are planned.
 - `H` opens the local consumption history.
