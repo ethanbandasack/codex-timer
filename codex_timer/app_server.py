@@ -126,19 +126,67 @@ class CodexServer:
     def token_usage(self) -> dict[str, Any]:
         return self.request("account/usage/read")
 
+    def _resolve_ping_model(self, preferred: str, effort: str) -> str:
+        catalog = self.request("model/list", {})
+        models = catalog.get("data") or []
+        available = {}
+        for model_info in models:
+            if not isinstance(model_info, dict) or model_info.get("hidden"):
+                continue
+            model_id = model_info.get("id") or model_info.get("model")
+            if isinstance(model_id, str):
+                available[model_id] = model_info
+
+        if preferred in available:
+            selected = preferred
+        elif preferred == DEFAULT_MODEL:
+            selected = next(
+                (
+                    model_id
+                    for model_id, model_info in available.items()
+                    if model_info.get("isDefault")
+                ),
+                None,
+            )
+            if selected is None and len(available) == 1:
+                selected = next(iter(available))
+        else:
+            selected = None
+
+        if selected:
+            supported_efforts = {
+                option.get("reasoningEffort")
+                for option in available[selected].get("supportedReasoningEfforts", [])
+                if isinstance(option, dict)
+            }
+            if supported_efforts and effort not in supported_efforts:
+                choices = ", ".join(sorted(supported_efforts))
+                raise RuntimeError(
+                    f"Model {selected!r} does not support {effort!r} effort. "
+                    f"Supported efforts: {choices}."
+                )
+            return selected
+
+        choices = ", ".join(sorted(available)) or "none reported"
+        raise RuntimeError(
+            f"Model {preferred!r} is not available in this Codex CLI. "
+            f"Available models: {choices}. Update Codex or choose an available model."
+        )
+
     def ping(
         self,
         model: str = DEFAULT_MODEL,
         effort: str = DEFAULT_EFFORT,
         timeout: float = 30,
-    ) -> None:
+    ) -> str:
+        model = self._resolve_ping_model(model, effort)
         thread_result = self.request(
             "thread/start",
             {
                 "model": model,
                 "cwd": os.getcwd(),
                 "approvalPolicy": "never",
-                "sandbox": "readOnly",
+                "sandbox": "read-only",
                 "ephemeral": True,
                 "serviceName": "codex_timer",
             },
@@ -186,7 +234,7 @@ class CodexServer:
                 error = completed_turn.get("error") or {}
                 detail = error.get("message") or f"turn status: {status}"
                 raise RuntimeError(f"The hello turn did not complete ({detail})")
-            return
+            return model
 
     def close(self) -> None:
         if self.process.poll() is not None:

@@ -50,9 +50,11 @@ class UsageWorker(threading.Thread):
                         if action == "ping":
                             self.emit("ping", state="running", text="Sending one-word hello…")
                             try:
-                                server.ping(DEFAULT_MODEL, DEFAULT_EFFORT, timeout=30)
+                                used_model = server.ping(DEFAULT_MODEL, DEFAULT_EFFORT, timeout=30)
                                 self.emit(
-                                    "ping", state="done", text="Hello sent; temporary chat closed."
+                                    "ping",
+                                    state="done",
+                                    text=f"Hello sent with {used_model}; temporary chat closed.",
                                 )
                             except (RuntimeError, TimeoutError, OSError) as exc:
                                 self.emit("ping", state="error", text=f"Ping failed: {exc}")

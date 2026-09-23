@@ -115,11 +115,11 @@ def main() -> int:
                 )
                 return 0
 
-            print(
-                f"Sending a tiny hello ping with {args.model} ({args.effort} effort)…", flush=True
-            )
-            server.ping(args.model, args.effort, args.timeout)
-            print("Codex replied; the in-memory chat is now closed.")
+            print(f"Sending a tiny hello ping ({args.effort} effort)…", flush=True)
+            used_model = server.ping(args.model, args.effort, args.timeout)
+            if used_model != args.model:
+                print(f"{args.model} is unavailable here; used {used_model} instead.")
+            print(f"Codex replied with {used_model}; the in-memory chat is now closed.")
             limits = capture_history(server, history)
             print_status(limits)
             print(f"Local history: {history.path}")
