@@ -9,6 +9,9 @@ description = "A minimal terminal app for Codex pings and usage reset timers"
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+charts = ["matplotlib>=3.8,<4"]
+
 [project.scripts]
 codex-timer = "codex_timer.cli:main"
 

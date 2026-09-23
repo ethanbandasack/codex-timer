@@ -11,7 +11,6 @@ import time
 from collections import deque
 from typing import Any
 
-
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_EFFORT = "low"
 RPC_TIMEOUT_SECONDS = 45
@@ -207,7 +206,7 @@ class CodexServer:
                 self.process.kill()
                 self.process.wait(timeout=2)
 
-    def __enter__(self) -> CodexServer:
+    def __enter__(self) -> Any:
         return self
 
     def __exit__(self, *_: object) -> None:
