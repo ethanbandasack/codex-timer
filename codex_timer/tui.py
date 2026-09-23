@@ -86,6 +86,19 @@ def _export_history(events: queue.Queue[dict[str, Any]]) -> None:
     events.put({"kind": "export", "state": "done", "text": f"PNG saved to {output}"})
 
 
+def _planned_rows(store: HistoryStore, limits: dict[str, Any]) -> list[dict[str, Any]]:
+    primary = limits.get("primary") or {}
+    reset_at = primary.get("resetsAt")
+    reset_at = reset_at if isinstance(reset_at, (int, float)) else None
+    anchor = store.ensure_plan_anchor(reset_at)
+    if anchor is None:
+        return []
+    return [
+        {"id": None, "position": -1, "scheduled_at": anchor},
+        *store.planned_slots(),
+    ]
+
+
 def _safe_addstr(screen: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     height, width = screen.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
@@ -159,7 +172,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     show_history = False
     show_schedule = False
     selected_window = 0
-    planned_slots: list[dict[str, Any]] = []
+    planned_rows: list[dict[str, Any]] = []
     selected_slot_index = 0
     history_lines: list[str] = []
     keep_running = True
@@ -187,6 +200,19 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 old_resets = new_resets
                 last_updated = updated
                 connection = "Connected to Codex"
+                if show_schedule:
+                    try:
+                        previous_anchor = planned_rows[0]["scheduled_at"] if planned_rows else None
+                        planned_rows = _planned_rows(HistoryStore(), limits)
+                        if planned_rows and previous_anchor is None:
+                            message = "Reset-based plan loaded"
+                            message_attr = curses.color_pair(2) | curses.A_BOLD
+                        elif planned_rows and planned_rows[0]["scheduled_at"] != previous_anchor:
+                            message = "Codex reset changed; anchor and bands shifted with it"
+                            message_attr = curses.color_pair(2) | curses.A_BOLD
+                    except sqlite3.Error as exc:
+                        message = f"Could not load reset time: {exc}"
+                        message_attr = curses.color_pair(3) | curses.A_BOLD
             elif event["kind"] == "ping":
                 message = event["text"]
                 ping_running = event["state"] == "running"
@@ -217,45 +243,49 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 3,
                 2,
-                "PLANNED SLOTS · LOCAL ONLY, SEPARATE FROM CODEX RESET TIMES",
+                "RESET + BANDS · LOCAL PLAN BASED ON THE CODEX 5-HOUR RESET",
                 curses.color_pair(2) | curses.A_BOLD,
             )
-            if planned_slots:
+            if planned_rows:
                 visible_rows = max(1, height - 10)
                 first_row = min(
                     max(0, selected_slot_index - visible_rows + 1),
-                    max(0, len(planned_slots) - visible_rows),
+                    max(0, len(planned_rows) - visible_rows),
                 )
-                for index in range(first_row, min(len(planned_slots), first_row + visible_rows)):
-                    slot = planned_slots[index]
+                for index in range(first_row, min(len(planned_rows), first_row + visible_rows)):
+                    slot = planned_rows[index]
                     scheduled_text = dt.datetime.fromtimestamp(
                         slot["scheduled_at"], tz=dt.timezone.utc
                     )
                     scheduled_text = scheduled_text.astimezone().strftime("%a %d %b  %H:%M %Z")
                     marker = ">" if index == selected_slot_index else " "
+                    label = "RESET" if index == 0 else f"+BAND {index:02}"
                     row = (
-                        f"{marker} {index + 1:02}   {scheduled_text}"
+                        f"{marker} {label:<9} {scheduled_text}"
                         f"   ·   in {remaining_text(slot['scheduled_at'])}"
                     )
                     attr = curses.A_REVERSE | curses.A_BOLD if index == selected_slot_index else 0
                     _safe_addstr(screen, 5 + index - first_row, 3, row, attr)
             else:
                 _safe_addstr(
-                    screen, 5, 3, "No planned slots yet. Press A to add one 5h01 from now."
+                    screen,
+                    5,
+                    3,
+                    "Codex reset time unavailable. Press R to refresh before adding a band.",
                 )
             _safe_addstr(screen, max(0, height - 5), 2, message, message_attr)
             _safe_addstr(
                 screen,
                 max(0, height - 3),
                 2,
-                "[↑↓] Select  [←→] Shift this and later slots 5m  [A] Add +5h01  [X] Delete  [S] Back",
+                "[↑↓] Select  [←→] Reset ±1h / band ±5m  [+] Add band  [X] Delete band  [S] Back",
                 curses.A_BOLD,
             )
             _safe_addstr(
                 screen,
                 max(0, height - 2),
                 2,
-                "Each new slot is 5h01 after the previous one; planned slots do not trigger pings.",
+                "Each band is 5h01 after the previous row; changing reset shifts every band.",
                 curses.A_DIM,
             )
         elif show_history:
@@ -351,52 +381,71 @@ def _terminal_app(screen: Any, executable: str) -> None:
         elif show_schedule and key == curses.KEY_UP:
             selected_slot_index = max(0, selected_slot_index - 1)
         elif show_schedule and key == curses.KEY_DOWN:
-            selected_slot_index = min(max(0, len(planned_slots) - 1), selected_slot_index + 1)
-        elif show_schedule and key in (curses.KEY_LEFT, curses.KEY_RIGHT) and planned_slots:
+            selected_slot_index = min(max(0, len(planned_rows) - 1), selected_slot_index + 1)
+        elif show_schedule and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            if not planned_rows:
+                message = "Reset time unavailable. Press R to refresh."
+                message_attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                try:
+                    store = HistoryStore()
+                    if selected_slot_index == 0:
+                        shift = 3600 if key == curses.KEY_RIGHT else -3600
+                        store.shift_plan_anchor(shift)
+                        planned_rows = _planned_rows(store, limits)
+                        direction = "later" if shift > 0 else "earlier"
+                        message = f"Planned reset and all bands moved one hour {direction}"
+                    else:
+                        shift = 300 if key == curses.KEY_RIGHT else -300
+                        store.shift_planned_slots(planned_rows[selected_slot_index]["id"], shift)
+                        planned_rows = _planned_rows(store, limits)
+                        direction = "later" if shift > 0 else "earlier"
+                        message = f"Selected band and later bands moved 5 minutes {direction}"
+                    message_attr = curses.color_pair(2) | curses.A_BOLD
+                except sqlite3.Error as exc:
+                    message = f"Could not move planned time: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("+"), ord("a"), ord("A")):
+            if not planned_rows:
+                message = "Reset time unavailable. Press R to refresh before adding a band."
+                message_attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                try:
+                    store = HistoryStore()
+                    store.add_planned_slot(anchor_at=planned_rows[0]["scheduled_at"])
+                    planned_rows = _planned_rows(store, limits)
+                    selected_slot_index = len(planned_rows) - 1
+                    message = "Added band 5h01 after the previous row"
+                    message_attr = curses.color_pair(2) | curses.A_BOLD
+                except sqlite3.Error as exc:
+                    message = f"Could not add band: {exc}"
+                    message_attr = curses.color_pair(3) | curses.A_BOLD
+        elif show_schedule and key in (ord("x"), ord("X")) and selected_slot_index > 0:
             try:
-                shift = 300 if key == curses.KEY_RIGHT else -300
                 store = HistoryStore()
-                store.shift_planned_slots(planned_slots[selected_slot_index]["id"], shift)
-                planned_slots = store.planned_slots()
-                direction = "later" if shift > 0 else "earlier"
-                message = f"Selected slot and later slots moved 5 minutes {direction}"
+                store.delete_planned_slot(planned_rows[selected_slot_index]["id"])
+                planned_rows = _planned_rows(store, limits)
+                selected_slot_index = min(selected_slot_index, max(0, len(planned_rows) - 1))
+                message = "Deleted selected band"
                 message_attr = curses.color_pair(2) | curses.A_BOLD
             except sqlite3.Error as exc:
-                message = f"Could not move planned slot: {exc}"
-                message_attr = curses.color_pair(3) | curses.A_BOLD
-        elif show_schedule and key in (ord("a"), ord("A")):
-            try:
-                store = HistoryStore()
-                store.add_planned_slot()
-                planned_slots = store.planned_slots()
-                selected_slot_index = len(planned_slots) - 1
-                message = "Added planned slot"
-                message_attr = curses.color_pair(2) | curses.A_BOLD
-            except sqlite3.Error as exc:
-                message = f"Could not add planned slot: {exc}"
-                message_attr = curses.color_pair(3) | curses.A_BOLD
-        elif show_schedule and key in (ord("x"), ord("X")) and planned_slots:
-            try:
-                store = HistoryStore()
-                store.delete_planned_slot(planned_slots[selected_slot_index]["id"])
-                planned_slots = store.planned_slots()
-                selected_slot_index = min(selected_slot_index, max(0, len(planned_slots) - 1))
-                message = "Deleted planned slot"
-                message_attr = curses.color_pair(2) | curses.A_BOLD
-            except sqlite3.Error as exc:
-                message = f"Could not delete planned slot: {exc}"
+                message = f"Could not delete band: {exc}"
                 message_attr = curses.color_pair(3) | curses.A_BOLD
         elif key in (ord("s"), ord("S")):
             show_schedule = not show_schedule
             show_history = False
             if show_schedule:
                 try:
-                    planned_slots = HistoryStore().planned_slots()
-                    selected_slot_index = min(selected_slot_index, max(0, len(planned_slots) - 1))
-                    message = "Local plan opened"
-                    message_attr = curses.A_DIM
+                    planned_rows = _planned_rows(HistoryStore(), limits)
+                    selected_slot_index = min(selected_slot_index, max(0, len(planned_rows) - 1))
+                    message = (
+                        "Reset-based plan opened"
+                        if planned_rows
+                        else "Reset time unavailable. Press R to refresh."
+                    )
+                    message_attr = curses.A_DIM if planned_rows else curses.color_pair(4)
                 except sqlite3.Error as exc:
-                    planned_slots = []
+                    planned_rows = []
                     message = f"Could not read planned slots: {exc}"
                     message_attr = curses.color_pair(3) | curses.A_BOLD
             else:
