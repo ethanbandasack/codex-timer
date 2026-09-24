@@ -15,7 +15,7 @@ Or double-click `Start Codex Timer.command`. The full-screen UI refreshes usage 
 Keyboard controls:
 
 - `P` sends a one-word hello using `gpt-5.6-luna` at low effort when available. If the installed Codex CLI does not support it, the app uses the CLI's advertised default model at low effort, then closes the in-memory chat.
-- `A` enables or pauses automatic pings for planned bands. Automatic pings run only while the terminal app is open; the app skips bands whose scheduled time passed while it was closed. Each band is attempted at most once. The reset row itself is not a ping.
+- Every planned band is an automatic ping. At its scheduled time, the app sends the same one-word hello as `P` and closes its temporary chat. Keep the terminal app open; bands missed while it was closed are skipped. Each band is attempted at most once. The reset row itself is not a ping.
 - `R` refreshes usage immediately.
 - `S` opens the programming menu, anchored to Codex's reported 5-hour reset. `+` adds a band after the previous row (default `05:01`, giving `08:01` then `13:02` for a `03:00` reset); `↑`/`↓` select rows; `←`/`→` shift the selected row and later rows by five minutes; `E` edits the selected local date and time; `I` changes the band interval and respaces existing bands; `X` deletes one band; `0` clears all bands so zero pings are planned.
 - `H` opens the local consumption history.
@@ -24,7 +24,7 @@ Keyboard controls:
 The hello can affect the current usage window, but it cannot restart a window already in progress. Reset countdowns use timestamps returned by Codex.
 
 The app records quota snapshots, Codex's daily token-activity totals, and per-response token counts from local session logs. It keeps 90 days of history in SQLite under `~/Library/Application Support/Codex Timer/history.sqlite3` on macOS. The local session importer stores token metadata only; it does not save prompts or responses. Those hourly counts cover Codex sessions on this device, while the account endpoint reports daily totals. Set `CODEX_TIMER_DATA_DIR` to move the data directory.
-The reset anchor, band interval, bands, and automatic-ping setting are stored locally in that database. Editing the anchor changes only the local plan; it cannot move before Codex's next reported reset. Bands must remain at least one minute after the previous row. Automatic pings are off until enabled with `A`; if enabled, each band sends the same one-word hello as `P` and closes its temporary chat.
+The reset anchor, band interval, and ping bands are stored locally in that database. Editing the anchor changes only the local plan; it cannot move before Codex's next reported reset. Bands must remain at least one minute after the previous row. Adding a band schedules a real ping; deleting it or clearing all bands removes that ping.
 
 ## Terminal commands
 

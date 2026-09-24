@@ -73,13 +73,12 @@ class UsageWorker(threading.Thread):
                             next_poll = time.monotonic() + 60
                         if time.monotonic() >= next_auto_check:
                             checked_at = time.time()
-                            if history.auto_ping_enabled():
-                                for slot in _due_planned_slots(
-                                    history.planned_slots(), last_auto_check, checked_at
-                                ):
-                                    scheduled_at = slot["scheduled_at"]
-                                    if history.claim_planned_ping(slot["id"], scheduled_at):
-                                        self._ping(server, history, automatic=True)
+                            for slot in _due_planned_slots(
+                                history.planned_slots(), last_auto_check, checked_at
+                            ):
+                                scheduled_at = slot["scheduled_at"]
+                                if history.claim_planned_ping(slot["id"], scheduled_at):
+                                    self._ping(server, history, automatic=True)
                             last_auto_check = checked_at
                             next_auto_check = time.monotonic() + 1
             except (RuntimeError, TimeoutError, OSError, sqlite3.Error) as exc:
@@ -283,7 +282,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
     show_history = False
     history_hourly = False
     show_schedule = False
-    auto_ping_enabled = HistoryStore().auto_ping_enabled()
     planned_rows: list[dict[str, Any]] = []
     selected_slot_index = 0
     planned_interval = DEFAULT_PLAN_INTERVAL_SECONDS
@@ -359,7 +357,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 3,
                 2,
-                f"RESET + BANDS · AUTO PING {'ON' if auto_ping_enabled else 'OFF'} · INTERVAL {interval_label}",
+                f"RESET + PING BANDS · INTERVAL {interval_label}",
                 curses.color_pair(2) | curses.A_BOLD,
             )
             if planned_rows:
@@ -376,7 +374,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                         .strftime("%a %d %b  %H:%M %Z")
                     )
                     marker = ">" if index == selected_slot_index else " "
-                    label = "RESET" if index == 0 else f"+BAND {index:02}"
+                    label = "RESET" if index == 0 else f"+PING {index:02}"
                     row = (
                         f"{marker} {label:<9} {scheduled_text}"
                         f"   ·   in {remaining_text(slot['scheduled_at'])}"
@@ -406,7 +404,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[E] Exact time  [I] Interval  [+] Add  [X] Delete  [0] Clear  [A] Auto ping",
+                "[E] Exact time  [I] Interval  [+] Add ping  [X] Delete  [0] Clear all",
                 curses.A_BOLD,
             )
             _safe_addstr(
@@ -426,7 +424,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[T] View  [H] Back  [S] Plan  [A] Auto ping  [E] PNG  [R] Refresh  [Q] Quit",
+                "[T] View  [H] Back  [S] Pings  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
         else:
@@ -488,14 +486,14 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 screen,
                 max(0, height - 3),
                 2,
-                "[P] Ping  [A] Auto ping  [S] Plan  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
+                "[P] Ping now  [S] Pings  [H] History  [E] PNG  [R] Refresh  [Q] Quit",
                 curses.A_BOLD,
             )
             _safe_addstr(
                 screen,
                 max(0, height - 2),
                 2,
-                f"Auto ping {'ON' if auto_ping_enabled else 'OFF'} · runs while this app stays open · refresh every 60s",
+                "Scheduled pings run while this app is open · refresh every 60s",
                 curses.A_DIM,
             )
         screen.refresh()
@@ -610,20 +608,6 @@ def _terminal_app(screen: Any, executable: str) -> None:
                 except sqlite3.Error as exc:
                     message = f"Could not add band: {exc}"
                     message_attr = curses.color_pair(3) | curses.A_BOLD
-        elif key in (ord("a"), ord("A")):
-            auto_ping_enabled = not auto_ping_enabled
-            try:
-                HistoryStore().set_auto_ping_enabled(auto_ping_enabled)
-                message = (
-                    "Automatic pings enabled for planned bands"
-                    if auto_ping_enabled
-                    else "Automatic pings paused"
-                )
-                message_attr = curses.color_pair(2) | curses.A_BOLD
-            except sqlite3.Error as exc:
-                auto_ping_enabled = not auto_ping_enabled
-                message = f"Could not save auto ping setting: {exc}"
-                message_attr = curses.color_pair(3) | curses.A_BOLD
         elif show_schedule and key in (ord("x"), ord("X")) and selected_slot_index > 0:
             try:
                 store = HistoryStore()

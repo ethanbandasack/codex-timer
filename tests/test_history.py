@@ -30,23 +30,41 @@ class FakeUsageSource:
 
 
 class HistoryStoreTests(unittest.TestCase):
-    def test_automatic_pings_default_off_and_attempts_are_deduplicated(self):
+    def test_planned_ping_attempts_are_deduplicated_and_removed_with_the_band(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = HistoryStore(Path(temp_dir) / "history.sqlite3")
-            enabled_by_default = store.auto_ping_enabled()
-            store.set_auto_ping_enabled(True)
-            enabled_after_save = HistoryStore(store.path).auto_ping_enabled()
-            first_claim = store.claim_planned_ping(7, 12_345, attempted_at=12_346)
-            duplicate_claim = store.claim_planned_ping(7, 12_345, attempted_at=12_347)
-            duplicate_after_reschedule = store.claim_planned_ping(7, 12_400, attempted_at=12_401)
+            store.ensure_plan_anchor(1_000)
+            slot = store.add_planned_slot(anchor_at=1_000)
+            first_claim = store.claim_planned_ping(
+                slot["id"], slot["scheduled_at"], attempted_at=12_346
+            )
+            duplicate_claim = store.claim_planned_ping(
+                slot["id"], slot["scheduled_at"], attempted_at=12_347
+            )
+            moved_claim = store.claim_planned_ping(
+                slot["id"], slot["scheduled_at"] + 60, attempted_at=12_348
+            )
+            store.delete_planned_slot(slot["id"])
+            replacement_after_delete = store.add_planned_slot(anchor_at=1_000)
+            claim_after_delete = store.claim_planned_ping(
+                replacement_after_delete["id"],
+                replacement_after_delete["scheduled_at"],
+                attempted_at=12_402,
+            )
             store.clear_planned_slots()
-            claim_after_clear = store.claim_planned_ping(7, 12_345, attempted_at=12_402)
+            replacement_after_clear = store.add_planned_slot(anchor_at=1_000)
+            claim_after_clear = store.claim_planned_ping(
+                replacement_after_clear["id"],
+                replacement_after_clear["scheduled_at"],
+                attempted_at=12_403,
+            )
 
-        self.assertFalse(enabled_by_default)
-        self.assertTrue(enabled_after_save)
         self.assertTrue(first_claim)
         self.assertFalse(duplicate_claim)
-        self.assertFalse(duplicate_after_reschedule)
+        self.assertFalse(moved_claim)
+        self.assertEqual(replacement_after_delete["id"], slot["id"])
+        self.assertTrue(claim_after_delete)
+        self.assertEqual(replacement_after_clear["id"], slot["id"])
         self.assertTrue(claim_after_clear)
 
     def test_local_session_import_stores_only_token_metadata_and_is_incremental(self):
