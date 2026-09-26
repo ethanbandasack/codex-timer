@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import shutil
 import subprocess
-import sys
 import time
 from typing import Any, Callable
 
@@ -89,13 +89,11 @@ def short_status(limits: dict[str, Any], now: float) -> str:
 
 
 def notify_desktop(title: str, message: str) -> bool:
-    if sys.platform != "darwin":
+    notify_send = shutil.which("notify-send")
+    if notify_send is None:
         return False
-    escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
-    escaped_message = message.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'display notification "{escaped_message}" with title "{escaped_title}"'
     result = subprocess.run(
-        ["osascript", "-e", script],
+        [notify_send, title, message],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
