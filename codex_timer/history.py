@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ def default_data_dir() -> Path:
     configured = os.environ.get("CODEX_TIMER_DATA_DIR")
     if configured:
         return Path(configured).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Codex Timer"
     xdg_data_home = os.environ.get("XDG_DATA_HOME")
     if xdg_data_home:
         return Path(xdg_data_home).expanduser() / "codex-timer"

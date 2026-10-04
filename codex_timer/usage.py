@@ -6,6 +6,7 @@ import datetime as dt
 import math
 import shutil
 import subprocess
+import sys
 import time
 from typing import Any, Callable
 
@@ -89,16 +90,38 @@ def short_status(limits: dict[str, Any], now: float) -> str:
 
 
 def notify_desktop(title: str, message: str) -> bool:
-    notify_send = shutil.which("notify-send")
-    if notify_send is None:
+    if sys.platform == "darwin":
+        osascript = shutil.which("osascript")
+        if osascript is None:
+            return False
+        escaped_title = _escape_applescript_string(title)
+        escaped_message = _escape_applescript_string(message)
+        script = f'display notification "{escaped_message}" with title "{escaped_title}"'
+        command = [osascript, "-e", script]
+    elif sys.platform.startswith("linux"):
+        notify_send = shutil.which("notify-send")
+        if notify_send is None:
+            return False
+        command = [notify_send, title, message]
+    else:
         return False
+
     result = subprocess.run(
-        [notify_send, title, message],
+        command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
     return result.returncode == 0
+
+
+def _escape_applescript_string(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 def announce_reset(label: str, *, terminal_bell: bool = True) -> None:

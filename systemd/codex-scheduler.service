@@ -1,0 +1,16 @@
+[Unit]
+Description=Run Codex prompts scheduled with codex-schedule
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory="@APP_ROOT@"
+ExecStart="@APP_ROOT@/bin/codex-timer" schedule run
+Environment="PATH=@PATH@"
+# @EXTRA_ENVIRONMENT@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
