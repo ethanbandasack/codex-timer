@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from codex_timer.cli import make_parser
 from codex_timer.scheduler import PromptSchedule, format_schedule_time, parse_schedule_time
 
 
@@ -39,6 +40,21 @@ class PromptScheduleTests(unittest.TestCase):
         timestamp = parse_schedule_time("2026-10-08T12:00+00:00")
         self.assertEqual(timestamp, 1_791_460_800)
         self.assertTrue(format_schedule_time(timestamp).startswith("2026-10-08T"))
+
+    def test_cli_accepts_reasoning_levels_advertised_by_newer_models(self):
+        args = make_parser().parse_args(
+            [
+                "schedule",
+                "add",
+                "--at",
+                "2026-10-08T12:00+00:00",
+                "--prompt",
+                "Run a task",
+                "--effort",
+                "xhigh",
+            ]
+        )
+        self.assertEqual(args.effort, "xhigh")
 
 
 if __name__ == "__main__":

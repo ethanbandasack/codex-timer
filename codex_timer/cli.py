@@ -66,9 +66,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--directory", default=".", help="Chat working directory (default: current directory)."
     )
     add.add_argument("--model", default=DEFAULT_MODEL)
-    add.add_argument(
-        "--effort", default=DEFAULT_EFFORT, choices=("low", "medium", "high", "max")
-    )
+    add.add_argument("--effort", default=DEFAULT_EFFORT)
     add.add_argument("--prompt", required=True, help="Prompt text to send.")
     schedule_commands.add_parser("list", help="List scheduled prompts and their status.")
     cancel = schedule_commands.add_parser("cancel", help="Cancel a pending prompt by ID.")
