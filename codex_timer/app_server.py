@@ -126,16 +126,20 @@ class CodexServer:
     def token_usage(self) -> dict[str, Any]:
         return self.request("account/usage/read")
 
-    def _resolve_ping_model(self, preferred: str, effort: str) -> str:
-        catalog = self.request("model/list", {})
-        models = catalog.get("data") or []
-        available = {}
-        for model_info in models:
-            if not isinstance(model_info, dict) or model_info.get("hidden"):
+    def model_catalog(self) -> list[dict]:
+        """Return the installed Codex CLI's selectable, visible models."""
+        result = self.request("model/list", {})
+        models = []
+        for info in result.get("data") or []:
+            if not isinstance(info, dict) or info.get("hidden"):
                 continue
-            model_id = model_info.get("id") or model_info.get("model")
+            model_id = info.get("id") or info.get("model")
             if isinstance(model_id, str):
-                available[model_id] = model_info
+                models.append({**info, "id": model_id})
+        return models
+
+    def _resolve_ping_model(self, preferred: str, effort: str) -> str:
+        available = {info["id"]: info for info in self.model_catalog()}
 
         if preferred in available:
             selected = preferred
@@ -235,6 +239,66 @@ class CodexServer:
                 detail = error.get("message") or f"turn status: {status}"
                 raise RuntimeError(f"The hello turn did not complete ({detail})")
             return model
+
+    def send_prompt(
+        self,
+        prompt: str,
+        cwd: str,
+        model: str,
+        effort: str = DEFAULT_EFFORT,
+        timeout: float = 3600,
+    ) -> dict[str, str]:
+        """Start a persistent (non-ephemeral) chat and send its first prompt."""
+        model = self._resolve_ping_model(model, effort)
+        thread_result = self.request(
+            "thread/start",
+            {"model": model, "cwd": os.path.abspath(os.path.expanduser(cwd))},
+        )
+        thread_id = (thread_result.get("thread") or {}).get("id")
+        if not thread_id:
+            raise RuntimeError("Codex did not return a thread id")
+
+        turn_result = self.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt}],
+                "model": model,
+                "effort": effort,
+            },
+            timeout=timeout,
+        )
+        turn_id = (turn_result.get("turn") or {}).get("id")
+        if not turn_id:
+            raise RuntimeError("Codex did not return a turn id")
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    self.request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": turn_id},
+                        timeout=5,
+                    )
+                except (RuntimeError, TimeoutError):
+                    pass
+                raise TimeoutError(
+                    "The scheduled prompt exceeded its time limit and was interrupted"
+                )
+
+            event = self._next_message(remaining)
+            if event.get("method") != "turn/completed":
+                continue
+            completed_turn = (event.get("params") or {}).get("turn") or {}
+            if completed_turn.get("id") != turn_id:
+                continue
+            if completed_turn.get("status") != "completed":
+                error = completed_turn.get("error") or {}
+                detail = error.get("message") or f"turn status: {completed_turn.get('status')}"
+                raise RuntimeError(f"The scheduled prompt did not complete ({detail})")
+            return {"thread_id": str(thread_id), "model": model}
 
     def close(self) -> None:
         if self.process.poll() is not None:
