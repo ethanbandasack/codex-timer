@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-timer"
 version = "1.0.0"
-description = "A minimal terminal app for Codex pings and usage reset timers"
+description = "A cross-platform terminal app for Codex timers and scheduled prompts"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
 codex-timer = "codex_timer.cli:main"
+codex-schedule = "codex_timer.cli:schedule_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
