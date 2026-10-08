@@ -1,3 +1,3 @@
 #!/bin/zsh
 cd -- "$(dirname -- "$0")"
-exec bin/codex-timer
+exec bin/codex-timer "$@"
