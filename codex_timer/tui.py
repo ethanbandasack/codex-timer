@@ -254,7 +254,7 @@ def _terminal_app(screen: Any, executable: str) -> None:
     except curses.error:
         pass
     screen.keypad(True)
-    screen.timeout(250)
+    screen.timeout(1000)
     if curses.has_colors():
         curses.start_color()
         try:
@@ -499,6 +499,10 @@ def _terminal_app(screen: Any, executable: str) -> None:
         screen.refresh()
 
         key = screen.getch()
+        if key == -1:
+            # Keep the UI responsive without busy-polling if curses ignores its timeout.
+            time.sleep(0.1)
+            continue
         if key in (ord("q"), ord("Q"), 27):
             keep_running = False
         elif show_schedule and key == curses.KEY_UP:
