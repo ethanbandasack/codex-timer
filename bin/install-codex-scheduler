@@ -101,7 +101,7 @@ def main() -> int:
         elif sys.platform.startswith("linux"):
             if not shutil.which("systemctl"):
                 print(
-                    "Could not find systemctl; this installer supports systemd on Ubuntu.",
+                    "Could not find systemctl; this installer supports systemd on Linux.",
                     file=sys.stderr,
                 )
                 return 1

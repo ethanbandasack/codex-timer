@@ -13,8 +13,8 @@ from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .charts import ChartDependencyError, default_export_path, export_chart
 from .histogram import render_histogram, render_hourly_histogram
 from .history import HistoryStore, capture_history
-from .scheduler import PromptSchedule, format_schedule_time, parse_schedule_time
 from .schedule_tui import run_schedule_composer
+from .scheduler import PromptSchedule, format_schedule_time, parse_schedule_time
 from .tui import run_terminal_app
 from .usage import print_status, watch
 
@@ -66,9 +66,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--directory", default=".", help="Chat working directory (default: current directory)."
     )
     add.add_argument("--model", default=DEFAULT_MODEL)
-    add.add_argument(
-        "--effort", default=DEFAULT_EFFORT, choices=("low", "medium", "high", "max")
-    )
+    add.add_argument("--effort", default=DEFAULT_EFFORT)
     add.add_argument("--prompt", required=True, help="Prompt text to send.")
     schedule_commands.add_parser("list", help="List scheduled prompts and their status.")
     cancel = schedule_commands.add_parser("cancel", help="Cancel a pending prompt by ID.")

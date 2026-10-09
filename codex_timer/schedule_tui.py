@@ -13,7 +13,6 @@ from typing import Any
 from .app_server import DEFAULT_EFFORT, DEFAULT_MODEL, CodexServer
 from .scheduler import PromptSchedule, format_schedule_time
 
-
 HEADER_FIELDS = ("Send at", "Model", "Reasoning", "Directory")
 FIELD_COUNT = len(HEADER_FIELDS) + 1  # Prompt body is the final field.
 
@@ -89,7 +88,7 @@ def _draw_menu(
     note: str = "",
 ) -> None:
     screen.erase()
-    height, width = screen.getmaxyx()
+    height, _ = screen.getmaxyx()
     _safe_addstr(screen, 0, 2, "Compose scheduled Codex prompt", curses.A_BOLD)
     top = 3
     _safe_addstr(screen, top, 2, title, curses.A_BOLD)
@@ -231,7 +230,10 @@ def _compose(
     except curses.error:
         pass
 
-    scheduled = dt.datetime.now().replace(second=0, microsecond=0) + dt.timedelta(minutes=10)
+    scheduled = (
+        dt.datetime.now().astimezone().replace(second=0, microsecond=0)
+        + dt.timedelta(minutes=10)
+    )
     model_ids = [info["id"] for info in models]
     default_index = next(
         (index for index, info in enumerate(models) if info.get("isDefault")),
@@ -333,7 +335,9 @@ def _compose(
                     )
                     if edited is not None:
                         try:
-                            scheduled = dt.datetime.strptime(edited, "%Y-%m-%d %H:%M")
+                            scheduled = dt.datetime.strptime(
+                                edited, "%Y-%m-%d %H:%M"
+                            ).astimezone()
                             message = "Send time updated."
                         except ValueError:
                             message = "Use date format YYYY-MM-DD HH:MM."

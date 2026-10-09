@@ -37,13 +37,18 @@ class FakeUsageSource:
 
 
 class HistoryStoreTests(unittest.TestCase):
-    def test_default_data_dir_uses_xdg_data_home(self):
-        with patch.dict(
-            os.environ,
-            {"CODEX_TIMER_DATA_DIR": "", "XDG_DATA_HOME": "/tmp/codex-timer-xdg"},
-            clear=False,
-        ):
-            self.assertEqual(default_data_dir(), Path("/tmp/codex-timer-xdg/codex-timer"))
+    @patch("codex_timer.history.sys.platform", "darwin")
+    def test_default_data_dir_keeps_macos_application_support_location(self):
+        with patch.dict(os.environ, {"CODEX_TIMER_DATA_DIR": "", "XDG_DATA_HOME": ""}):
+            self.assertEqual(
+                default_data_dir(),
+                Path.home() / "Library" / "Application Support" / "Codex Timer",
+            )
+
+    @patch("codex_timer.history.sys.platform", "linux")
+    def test_default_data_dir_uses_linux_local_share_fallback(self):
+        with patch.dict(os.environ, {"CODEX_TIMER_DATA_DIR": "", "XDG_DATA_HOME": ""}):
+            self.assertEqual(default_data_dir(), Path.home() / ".local" / "share" / "codex-timer")
 
     def test_planned_ping_attempts_are_deduplicated_and_removed_with_the_band(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -126,7 +126,7 @@ class CodexServer:
     def token_usage(self) -> dict[str, Any]:
         return self.request("account/usage/read")
 
-    def model_catalog(self) -> list[dict[str, Any]]:
+    def model_catalog(self) -> list[dict]:
         """Return the installed Codex CLI's selectable, visible models."""
         result = self.request("model/list", {})
         models = []
@@ -248,17 +248,23 @@ class CodexServer:
         effort: str = DEFAULT_EFFORT,
         timeout: float = 3600,
     ) -> dict[str, str]:
-        """Start a saved, non-ephemeral chat and send its first prompt."""
+        """Run a scheduled prompt in a saved chat scoped to its working directory."""
         model = self._resolve_ping_model(model, effort)
         thread_result = self.request(
             "thread/start",
-            {"model": model, "cwd": os.path.abspath(os.path.expanduser(cwd))},
+            {
+                "model": model,
+                "cwd": os.path.abspath(os.path.expanduser(cwd)),
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "serviceName": "codex_timer",
+            },
         )
-        thread = thread_result.get("thread") or {}
-        thread_id = thread.get("id")
+        thread_id = (thread_result.get("thread") or {}).get("id")
         if not thread_id:
             raise RuntimeError("Codex did not return a thread id")
 
+        deadline = time.monotonic() + timeout
         turn_result = self.request(
             "turn/start",
             {
@@ -267,13 +273,12 @@ class CodexServer:
                 "model": model,
                 "effort": effort,
             },
-            timeout=timeout,
+            timeout=max(0.1, deadline - time.monotonic()),
         )
         turn_id = (turn_result.get("turn") or {}).get("id")
         if not turn_id:
             raise RuntimeError("Codex did not return a turn id")
 
-        deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

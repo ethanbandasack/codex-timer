@@ -89,14 +89,24 @@ def short_status(limits: dict[str, Any], now: float) -> str:
     return " | ".join(pieces)
 
 
+def _escape_applescript_string(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
 def notify_desktop(title: str, message: str) -> bool:
     if sys.platform == "darwin":
         osascript = shutil.which("osascript")
         if osascript is None:
             return False
-        escaped_title = _escape_applescript_string(title)
-        escaped_message = _escape_applescript_string(message)
-        script = f'display notification "{escaped_message}" with title "{escaped_title}"'
+        script = (
+            f'display notification "{_escape_applescript_string(message)}"'
+            f' with title "{_escape_applescript_string(title)}"'
+        )
         command = [osascript, "-e", script]
     elif sys.platform.startswith("linux"):
         notify_send = shutil.which("notify-send")
@@ -105,7 +115,6 @@ def notify_desktop(title: str, message: str) -> bool:
         command = [notify_send, title, message]
     else:
         return False
-
     result = subprocess.run(
         command,
         stdout=subprocess.DEVNULL,
@@ -113,15 +122,6 @@ def notify_desktop(title: str, message: str) -> bool:
         check=False,
     )
     return result.returncode == 0
-
-
-def _escape_applescript_string(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-    )
 
 
 def announce_reset(label: str, *, terminal_bell: bool = True) -> None:

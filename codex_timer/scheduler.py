@@ -85,7 +85,9 @@ class PromptSchedule:
             ).rowcount
             if changed != 1:
                 return None
-            return dict(row)
+            claimed = dict(row)
+            claimed.update(status="running", started_at=now)
+            return claimed
 
     def recover_interrupted(self) -> int:
         """Return jobs interrupted by a stopped runner to the pending queue."""
