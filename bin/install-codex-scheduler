@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Install the per-user service that runs scheduled Codex prompts."""
+
+from __future__ import annotations
+
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVICE_NAME = "codex-scheduler"
+LAUNCHD_LABEL = "com.codex-timer.scheduler"
+SERVICE_ENV_KEYS = ("CODEX_TIMER_DATA_DIR", "XDG_DATA_HOME", "CODEX_HOME")
+
+
+def _unit_escape(value: str) -> str:
+    """Escape a value placed inside a quoted systemd unit assignment."""
+    return value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _service_environment() -> dict[str, str]:
+    path = os.environ.get("PATH", "")
+    service_path = f"{PROJECT_ROOT / 'bin'}:{path}" if path else str(PROJECT_ROOT / "bin")
+    environment = {"PATH": service_path}
+    for key in SERVICE_ENV_KEYS:
+        if key in os.environ:
+            environment[key] = os.environ[key]
+    return environment
+
+
+def _install_systemd() -> None:
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_template = PROJECT_ROOT / "systemd" / "codex-scheduler.service"
+    unit = unit_template.read_text(encoding="utf-8")
+    unit = unit.replace("@APP_ROOT@", _unit_escape(str(PROJECT_ROOT)))
+    unit = unit.replace("@PATH@", _unit_escape(_service_environment()["PATH"]))
+    extra_environment = "".join(
+        f'Environment="{key}={_unit_escape(value)}"\n'
+        for key, value in _service_environment().items()
+        if key != "PATH"
+    )
+    unit = unit.replace("# @EXTRA_ENVIRONMENT@", extra_environment.rstrip())
+    (unit_dir / f"{SERVICE_NAME}.service").write_text(unit, encoding="utf-8")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.service"],
+        check=True,
+    )
+    print("Installed and started the codex-scheduler systemd user service.")
+
+
+def _install_launchd() -> None:
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    logs = Path.home() / "Library" / "Logs"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
+    plist_path = launch_agents / f"{LAUNCHD_LABEL}.plist"
+    uid = os.getuid()
+    target = f"gui/{uid}/{LAUNCHD_LABEL}"
+    subprocess.run(["launchctl", "bootout", target], check=False, capture_output=True)
+
+    environment = _service_environment()
+    definition = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [
+            str(PROJECT_ROOT / "bin" / "codex-timer"),
+            "schedule",
+            "run",
+        ],
+        "WorkingDirectory": str(PROJECT_ROOT),
+        "EnvironmentVariables": environment,
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": str(logs / f"{SERVICE_NAME}.log"),
+        "StandardErrorPath": str(logs / f"{SERVICE_NAME}.log"),
+    }
+    plist_path.write_bytes(plistlib.dumps(definition, fmt=plistlib.FMT_XML))
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=True)
+    print(f"Installed and started the codex-scheduler launch agent at {plist_path}.")
+
+
+def main() -> int:
+    if not (PROJECT_ROOT / "bin" / "codex-timer").is_file():
+        print("Run this installer from a complete Codex Timer checkout.", file=sys.stderr)
+        return 1
+    if not shutil.which("codex"):
+        print(
+            "Could not find the Codex CLI on PATH. Install it before enabling the scheduler.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        if sys.platform == "darwin":
+            _install_launchd()
+        elif sys.platform.startswith("linux"):
+            if not shutil.which("systemctl"):
+                print(
+                    "Could not find systemctl; this installer supports systemd on Ubuntu.",
+                    file=sys.stderr,
+                )
+                return 1
+            _install_systemd()
+        else:
+            print(f"Scheduled prompts are not supported on {sys.platform}.", file=sys.stderr)
+            return 1
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"Could not install the codex-scheduler service: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

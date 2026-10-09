@@ -1,11 +1,18 @@
 import datetime as dt
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from codex_timer.history import DEFAULT_PLAN_INTERVAL_SECONDS, HistoryStore, capture_history
+from codex_timer.history import (
+    DEFAULT_PLAN_INTERVAL_SECONDS,
+    HistoryStore,
+    capture_history,
+    default_data_dir,
+)
 
 
 class FakeUsageSource:
@@ -30,6 +37,14 @@ class FakeUsageSource:
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_default_data_dir_uses_xdg_data_home(self):
+        with patch.dict(
+            os.environ,
+            {"CODEX_TIMER_DATA_DIR": "", "XDG_DATA_HOME": "/tmp/codex-timer-xdg"},
+            clear=False,
+        ):
+            self.assertEqual(default_data_dir(), Path("/tmp/codex-timer-xdg/codex-timer"))
+
     def test_planned_ping_attempts_are_deduplicated_and_removed_with_the_band(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = HistoryStore(Path(temp_dir) / "history.sqlite3")
